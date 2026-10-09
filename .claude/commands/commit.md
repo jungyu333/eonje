@@ -18,7 +18,7 @@ Stage and commit all current changes with a conventional commit message.
 3. **Check recent style** — run `git log --oneline -5` to match the repository's commit message style
 
 4. **Stage files** — add all relevant changed and untracked files
-   - Never stage `.env`, anything under `data/` or `logs/`, or fixtures that contain a `serviceKey`
+   - Never stage `.env`, anything under `data/` or `logs/`, or any file that contains an actual service key value (the literal `serviceKey` parameter name in docs or rules is fine)
 
 5. **Commit** — create a commit with a conventional commit message
    - Format: `<type>(<scope>): <short description>`
