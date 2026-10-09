@@ -1,0 +1,9 @@
+# Lock files
+uv.lock
+
+# Local data and logs
+data/
+logs/
+
+# Large fixtures
+tests/fixtures/*.parquet
