@@ -19,7 +19,7 @@ dependencies = [
 api = ["fastapi>=0.111", "uvicorn[standard]>=0.30"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "pandas-stubs"]
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.10", "pandas-stubs", "pre-commit"]
 
 [build-system]
 requires = ["hatchling"]
