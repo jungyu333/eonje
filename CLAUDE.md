@@ -54,15 +54,16 @@ docs/         # design.md, requirements.md
 
 ## Common Commands
 
+All commands via **Makefile** (`make help` lists targets):
+
 ```
-uv sync --all-extras          # install
-uv run pytest                 # tests (no network, no DB)
-uv run pre-commit install     # once per clone; hooks run ruff on every commit
-uv run pre-commit run --all-files
-uv run ruff check . && uv run ruff format --check .
-uv run mypy
-docker build -t eonje:dev .   # task + API image
-docker compose -f infra/compose.yaml up -d
+make install      # uv sync --all-extras
+make hooks        # pre-commit install (once per clone)
+make check        # lint + typecheck + test — same as CI
+make test ARGS="-k cli"
+make test-debug   # -x -vv -l -s, stop at first failure with locals
+make build        # docker build eonje:dev
+make run JOB=fetch-delta RUN_ID=manual__x
 ```
 
 ## Git & PR Conventions
