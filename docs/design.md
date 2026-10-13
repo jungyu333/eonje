@@ -67,7 +67,11 @@ flowchart LR
 ```
 eonje/
   eonje/                  # 순수 Python 패키지. Airflow를 import하지 않는다
-    cli.py                # 태스크 진입점: `python -m eonje.cli <job> --run-id ...`. 각 job은 함수 하나 호출
+    cli/                  # 태스크 진입점: `python -m eonje.cli <job> --run-id ...`
+      __main__.py         # app.main 위임만
+      app.py              # 인자 파싱, 설정 로드, job 디스패치, 종료 코드
+      registry.py         # job 이름 → 함수 매핑
+      jobs/               # job 하나 = 모듈 하나 = DAG 태스크 하나. client·storage·transform 배선만, 로직 없음
     config.py             # 설정값 (한도·간격·지역·페이지 크기). 환경변수에서 로드
     client/               # API 클라이언트: 요청 조립, 페이지네이션, 재시도, 응답 검증
     budget/               # 호출 예산: 오늘 사용량 조회, 실행 가능 여부·페이지 상한 판단
@@ -109,6 +113,7 @@ eonje/
 - **외부 I/O를 아는 코드는 `client/`와 `storage/`뿐.** `transform/`은 순수 함수라 fixture로 테스트한다.
 - **API 어휘(`statId`, `chgerId`, `stat`…)는 `observations.py`에서 내부 어휘(`stat_id`, `charger_id`, `status_code`)로 한 번 번역**하고, 그 아래로는 내부 어휘만 쓴다. 응답 필드가 바뀌어도 수정 지점은 한 곳.
 - 설정값은 `config.py`에서만 읽는다. DAG 스케줄 간격도 거기서 가져온다 (DAG 파일은 환경변수를 직접 읽음 — eonje import 불가).
+- **`__init__.py`에는 로직을 두지 않는다.** 전부 빈 파일. re-export도 하지 않아 import는 항상 모듈까지 적는다 (`from eonje.cli.app import main`). `__main__.py`는 위임 두 줄만.
 - **DB 스키마의 단일 출처는 `models.py`.** 파이프라인 적재와 API 조회가 같은 모델을 쓴다. 대량 적재는 ORM 객체 생성 없이 `insert(Model).values(rows).on_conflict_do_update(...)`로 — 행 단위 `session.add`는 금지.
 
 ### 2.5 런타임 토폴로지
@@ -187,7 +192,7 @@ flowchart TB
 | 컨테이너 | Docker, docker compose | 로컬 = 클라우드. 빌드 대상은 `eonje` 이미지 하나 |
 | 클라우드 | 소형 VM 1대 + S3 호환 스토리지 (업체 미정) | 비용 기준으로 선택. compose 그대로 |
 | 테스트 | pytest, 실제 응답 fixture | `transform/`은 fixture만으로 100% 커버 목표. DB 테스트는 Actions `services:` Postgres |
-| 품질 | ruff (lint·format), mypy, pre-commit | |
+| 품질 | ruff (lint·format), mypy, pre-commit | pre-commit 훅: ruff --fix, ruff-format, EOF·공백·YAML·TOML 검사, 대용량 파일·개인키 차단. mypy는 CI에서만 |
 | CI | GitHub Actions | ruff + mypy + pytest + `eonje` 이미지 빌드. 첫 커밋부터 |
 | CD | 처음엔 수동 (`git pull && docker compose build eonje && up -d`). 배포가 잦아지면 GHCR push + SSH `compose pull` job | VM `.env`는 서버에만. Actions secrets는 SSH 키만 |
 | 알림·관측 | 텔레그램 봇 (운영자 통지), Airflow UI | Prometheus/Grafana는 필요해지면 — 1인 운영에 과함 |
@@ -324,7 +329,7 @@ FastAPI. 집계 테이블만 읽는다. `/v1/` 접두. 충전소 상세는 호�
 
 ## 10. 구현 순서 (우선순위)
 
-1. 레포 골격 + CI + `eonje/client` + `storage/raw` + `cli.py` + Dockerfile. 로컬에서 1회 전체 수집해 Parquet 확인
+1. 레포 골격 + CI + `eonje/client` + `storage/raw` + `cli/` + Dockerfile. 로컬에서 1회 전체 수집해 Parquet 확인
 2. `ev_status_10min` 수집 부분(`check_budget`·`fetch_delta`)까지 compose에 올려 **VM에서 돌리기 시작** (데이터 적재 시작)
 3. `ev_master_daily` + `models.py` 차원 테이블 + 첫 Alembic 마이그레이션
 4. 관측 → 전이 → 세션 파생. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률)

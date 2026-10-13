@@ -22,6 +22,7 @@ Review the current branch against `main` following the project's boundary and da
 - [ ] No business logic in `api/` — it only queries aggregate tables and shapes responses
 - [ ] API field names (`statId`, `chgerId`, `stat`, ...) appear only in `client/` and `transform/observations.py`
 - [ ] Settings are read via `config.py`, not `os.environ` scattered in code (DAG files excepted)
+- [ ] `__init__.py` files are empty; `cli/jobs/*` contain wiring only, no business logic
 
 ### Data Correctness
 - [ ] Raw writes keep all response fields as strings; no filtering or type conversion before storage
