@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable
 from datetime import UTC
 
@@ -7,7 +8,7 @@ from tenacity import wait_none
 
 from eonje.client.errors import ApiError, TransientError, UnexpectedResponseError
 from eonje.client.evcharger import EvChargerClient
-from eonje.client.types import CallRecord
+from eonje.client.types import CallRecord, Page
 from eonje.config import Settings
 
 Load = Callable[[str], str]
@@ -336,3 +337,263 @@ def test_client_works_without_on_call_callback(fixture_text: Load) -> None:
 
     # THEN it succeeds
     assert page.total_count == 4
+
+
+# --- pagination (iter_pages) ------------------------------------------------
+
+
+def _with_total(text: str, total: int) -> str:
+    """Return a fixture body with totalCount replaced (page size in tests is 500)."""
+    body = json.loads(text)
+    body["totalCount"] = total
+    return json.dumps(body, ensure_ascii=False)
+
+
+def _sent_page_nos(transport: ScriptedTransport) -> list[str]:
+    return [r.url.params["pageNo"] for r in transport.requests]
+
+
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [(0, 1), (1, 1), (499, 1), (500, 1), (501, 2), (1000, 2), (1001, 3)],
+)
+def test_requested_page_count_is_ceiling_of_total_over_page_size_with_minimum_one(
+    total: int, expected: int, fixture_text: Load
+) -> None:
+    # GIVEN a first page reporting `total` rows with a page size of 500
+    text = _with_total(fixture_text("getChargerStatus_page.json"), total)
+    client, transport, _ = _client([_ok(text)] * expected)
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN ceil(total / 500) pages are requested, never fewer than 1
+    expected_page_nos = list(range(1, expected + 1))
+    assert [p.page_no for p in pages] == expected_page_nos
+    assert _sent_page_nos(transport) == [str(n) for n in expected_page_nos]
+
+
+def test_single_page_result_makes_exactly_one_request(fixture_text: Load) -> None:
+    # GIVEN a first page whose totalCount fits in one page
+    client, transport, _ = _client([_ok(fixture_text("getChargerStatus_page.json"))])
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {"period": "10"}))
+
+    # THEN only page 1 is requested and returned
+    assert [p.page_no for p in pages] == [1]
+    assert _sent_page_nos(transport) == ["1"]
+
+
+def test_all_pages_derived_from_first_total_count_are_fetched_in_order(
+    fixture_text: Load,
+) -> None:
+    # GIVEN totalCount=1001 with page size 500 (3 pages)
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1001)
+    client, transport, _ = _client([_ok(text)] * 3)
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {"period": "10"}))
+
+    # THEN pages 1..3 are requested in order with the caller params on each
+    assert [p.page_no for p in pages] == [1, 2, 3]
+    assert _sent_page_nos(transport) == ["1", "2", "3"]
+    assert all(r.url.params["period"] == "10" for r in transport.requests)
+
+
+def test_exact_multiple_of_page_size_does_not_request_an_extra_page(
+    fixture_text: Load,
+) -> None:
+    # GIVEN totalCount=1000 with page size 500
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1000)
+    client, transport, _ = _client([_ok(text)] * 2)
+
+    # WHEN all pages are iterated
+    list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN exactly 2 requests are made
+    assert _sent_page_nos(transport) == ["1", "2"]
+
+
+def test_no_data_first_page_yields_one_empty_page_and_stops(fixture_text: Load) -> None:
+    # GIVEN resultCode 03 (NODATA) on page 1
+    client, transport, records = _client([_ok(fixture_text("getChargerStatus_no_data.json"))])
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {"period": "10"}))
+
+    # THEN one empty page is yielded after a single request
+    assert [(p.page_no, p.items) for p in pages] == [(1, [])]
+    assert len(transport.requests) == 1
+    assert len(records) == 1
+
+
+def test_max_pages_caps_the_number_of_requests(fixture_text: Load) -> None:
+    # GIVEN 3 pages available but a cap of 2
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1001)
+    client, transport, records = _client([_ok(text)] * 3)
+
+    # WHEN pages are iterated with max_pages=2
+    pages = list(client.iter_pages("getChargerStatus", {}, max_pages=2))
+
+    # THEN only pages 1 and 2 are requested and logged
+    assert [p.page_no for p in pages] == [1, 2]
+    assert _sent_page_nos(transport) == ["1", "2"]
+    assert len(records) == 2
+
+
+def test_max_pages_above_available_pages_fetches_only_available(
+    fixture_text: Load,
+) -> None:
+    # GIVEN 2 pages available and a cap of 10
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1000)
+    client, transport, _ = _client([_ok(text)] * 2)
+
+    # WHEN pages are iterated with max_pages=10
+    pages = list(client.iter_pages("getChargerStatus", {}, max_pages=10))
+
+    # THEN only the 2 available pages are requested
+    assert [p.page_no for p in pages] == [1, 2]
+    assert len(transport.requests) == 2
+
+
+def test_max_pages_of_one_fetches_only_the_first_page(fixture_text: Load) -> None:
+    # GIVEN 3 pages available and a cap of 1
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1001)
+    client, transport, _ = _client([_ok(text)])
+
+    # WHEN pages are iterated with max_pages=1
+    pages = list(client.iter_pages("getChargerStatus", {}, max_pages=1))
+
+    # THEN only page 1 is requested
+    assert [p.page_no for p in pages] == [1]
+    assert _sent_page_nos(transport) == ["1"]
+
+
+@pytest.mark.parametrize("max_pages", [0, -1])
+def test_non_positive_max_pages_makes_no_request(max_pages: int) -> None:
+    # GIVEN a budget cap of zero (or below)
+    client, transport, records = _client([])
+
+    # WHEN pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {}, max_pages=max_pages))
+
+    # THEN nothing is fetched or logged
+    assert pages == []
+    assert transport.requests == []
+    assert records == []
+
+
+def test_pages_are_fetched_lazily_as_the_caller_consumes_them(fixture_text: Load) -> None:
+    # GIVEN 3 pages available
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1001)
+    client, transport, _ = _client([_ok(text)] * 3)
+
+    # WHEN the caller takes only the first page
+    first = next(client.iter_pages("getChargerStatus", {}))
+
+    # THEN no further page has been requested
+    assert first.page_no == 1
+    assert len(transport.requests) == 1
+
+
+def test_total_count_is_taken_from_the_first_page_only(fixture_text: Load) -> None:
+    # GIVEN page 1 reports 1001 rows (3 pages) and later pages report 4 rows
+    base = fixture_text("getChargerStatus_page.json")
+    steps: list[Step] = [
+        _ok(_with_total(base, 1001)),
+        _ok(_with_total(base, 4)),
+        _ok(_with_total(base, 4)),
+    ]
+    client, transport, _ = _client(steps)
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN the page count derived from page 1 is kept
+    assert [p.page_no for p in pages] == [1, 2, 3]
+    assert len(transport.requests) == 3
+
+
+def test_empty_page_mid_iteration_is_yielded_and_iteration_continues(
+    fixture_text: Load,
+) -> None:
+    # GIVEN 3 pages where page 2 comes back with items=""
+    first = _with_total(fixture_text("getChargerStatus_page.json"), 1001)
+    empty = fixture_text("getChargerStatus_empty_page.json")
+    client, _, _ = _client([_ok(first), _ok(empty), _ok(first)])
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN the empty page is yielded in place and page 3 is still fetched
+    assert [(p.page_no, len(p.items)) for p in pages] == [(1, 4), (2, 0), (3, 4)]
+
+
+def test_items_are_passed_through_unchanged_across_pages(fixture_text: Load) -> None:
+    # GIVEN 2 pages with duplicate rows, unknown stat codes and blank optionals
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1000)
+    client, _, _ = _client([_ok(text)] * 2)
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN every item is kept as received, including duplicates and codes "7" and ""
+    expected = json.loads(text)["items"]["item"]
+    assert [p.items for p in pages] == [expected, expected]
+    assert [i["stat"] for i in pages[0].items] == ["3", "3", "7", ""]
+    assert pages[0].items[2]["lastTedt"] == ""
+    assert pages[0].items[2]["maker"] == "XX"
+
+
+def test_transient_failure_on_a_later_page_is_retried_within_iteration(
+    fixture_text: Load,
+) -> None:
+    # GIVEN 2 pages where page 2 first returns 503
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1000)
+    client, transport, records = _client([_ok(text), httpx.Response(503), _ok(text)])
+
+    # WHEN all pages are iterated
+    pages = list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN page 2 is retried and both pages are returned
+    assert [p.page_no for p in pages] == [1, 2]
+    assert _sent_page_nos(transport) == ["1", "2", "2"]
+    assert [(r.page_no, r.attempt) for r in records] == [(1, 1), (2, 1), (2, 2)]
+
+
+def test_api_error_on_a_later_page_propagates_after_earlier_pages_were_yielded(
+    fixture_text: Load,
+) -> None:
+    # GIVEN 3 pages where page 2 returns resultCode 22
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1001)
+    error = fixture_text("getChargerStatus_api_error.json")
+    client, transport, _ = _client([_ok(text), _ok(error)])
+    received: list[int] = []
+
+    # WHEN pages are iterated
+    with pytest.raises(ApiError):
+        for page in client.iter_pages("getChargerStatus", {}):
+            received.append(page.page_no)
+
+    # THEN page 1 was delivered and page 3 was never requested
+    assert received == [1]
+    assert _sent_page_nos(transport) == ["1", "2"]
+
+
+def test_iterating_twice_over_the_same_responses_yields_the_same_pages(
+    fixture_text: Load,
+) -> None:
+    # GIVEN the same 2-page responses served for two runs
+    text = _with_total(fixture_text("getChargerStatus_page.json"), 1000)
+    client, _, _ = _client([_ok(text)] * 4)
+
+    # WHEN pages are iterated twice
+    first = list(client.iter_pages("getChargerStatus", {}))
+    second = list(client.iter_pages("getChargerStatus", {}))
+
+    # THEN page numbers, totals and items match
+    def key(pages: list[Page]) -> list[tuple[int, int, list[dict[str, str]]]]:
+        return [(p.page_no, p.total_count, p.items) for p in pages]
+
+    assert key(first) == key(second)
