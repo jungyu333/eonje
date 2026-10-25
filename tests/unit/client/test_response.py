@@ -276,3 +276,161 @@ def test_real_gateway_error_keeps_reason_code_and_message(fixture_text: Load) ->
     # THEN the gateway reason code and message survive for the call log
     assert exc.value.result_code == "30"
     assert "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in str(exc.value)
+
+
+def test_real_status_page_returns_page_items_and_full_total_count(fixture_text: Load) -> None:
+    # GIVEN a real getChargerStatus first page (numOfRows=10 of 16239)
+    text = fixture_text("real_status_page.json")
+
+    # WHEN it is parsed
+    parsed = parse_response(text)
+
+    # THEN the code is normal, totalCount is the full count and only this page's items return
+    assert parsed.result_code == "00"
+    assert parsed.total_count == 16239
+    assert len(parsed.items) == 10
+
+
+def test_real_status_items_are_passed_through_unchanged(fixture_text: Load) -> None:
+    # GIVEN a real getChargerStatus page
+    text = fixture_text("real_status_page.json")
+    expected = json.loads(text)["items"]["item"]
+
+    # WHEN it is parsed
+    items = parse_response(text).items
+
+    # THEN every item equals the received object: same keys, same string values
+    assert items == expected
+
+
+def test_real_status_items_keep_empty_now_tsdt_as_empty_string(fixture_text: Load) -> None:
+    # GIVEN a real getChargerStatus page where no charger is currently charging
+    text = fixture_text("real_status_page.json")
+
+    # WHEN it is parsed
+    items = parse_response(text).items
+
+    # THEN nowTsdt is present on every item as an empty string, not dropped or None
+    assert [i["nowTsdt"] for i in items] == [""] * 10
+
+
+def test_real_status_items_keep_status_codes_as_strings(fixture_text: Load) -> None:
+    # GIVEN a real getChargerStatus page with stat "2" and "5"
+    text = fixture_text("real_status_page.json")
+
+    # WHEN it is parsed
+    stats = {i["stat"] for i in parse_response(text).items}
+
+    # THEN status codes stay as received strings; mapping happens at aggregation time
+    assert stats == {"2", "5"}
+
+
+def test_real_status_page_keeps_each_charger_of_a_station(fixture_text: Load) -> None:
+    # GIVEN a real page where station ME174050 has chargers 01..05
+    text = fixture_text("real_status_page.json")
+
+    # WHEN it is parsed
+    items = parse_response(text).items
+
+    # THEN all five chargers are present (same statId is not a duplicate)
+    chargers = sorted(i["chgerId"] for i in items if i["statId"] == "ME174050")
+    assert chargers == ["01", "02", "03", "04", "05"]
+
+
+def test_parsing_real_status_page_twice_yields_equal_results(fixture_text: Load) -> None:
+    # GIVEN a real getChargerStatus page
+    text = fixture_text("real_status_page.json")
+
+    # WHEN it is parsed twice
+    first, second = parse_response(text), parse_response(text)
+
+    # THEN the results are equal
+    assert first == second
+
+
+def test_real_info_page_returns_page_items_and_full_total_count(fixture_text: Load) -> None:
+    # GIVEN a real getChargerInfo first page (numOfRows=10 of 76183)
+    text = fixture_text("real_info_page.json")
+
+    # WHEN it is parsed
+    parsed = parse_response(text)
+
+    # THEN the code is normal, totalCount is the full count and only this page's items return
+    assert parsed.result_code == "00"
+    assert parsed.total_count == 76183
+    assert len(parsed.items) == 10
+
+
+def test_real_info_items_keep_undocumented_maker_field(fixture_text: Load) -> None:
+    # GIVEN a real getChargerInfo page carrying "maker", which the API docs do not list
+    text = fixture_text("real_info_page.json")
+
+    # WHEN it is parsed
+    items = parse_response(text).items
+
+    # THEN maker is present on every item with the received value
+    assert {i["maker"] for i in items} == {"시그넷", "채비"}
+
+
+def test_real_info_items_keep_every_received_field(fixture_text: Load) -> None:
+    # GIVEN a real getChargerInfo page whose items carry 37 fields
+    text = fixture_text("real_info_page.json")
+    expected = json.loads(text)["items"]["item"]
+
+    # WHEN it is parsed
+    items = parse_response(text).items
+
+    # THEN every item equals the received object, field for field
+    assert items == expected
+    assert all(len(i) == 37 for i in items)
+
+
+def test_real_info_items_are_not_type_converted(fixture_text: Load) -> None:
+    # GIVEN a real getChargerInfo item with numeric-looking fields
+    text = fixture_text("real_info_page.json")
+
+    # WHEN it is parsed
+    item = next(i for i in parse_response(text).items if i["statId"] == "ME174013")
+
+    # THEN lat/lng/output/year stay strings; conversion belongs to transform/
+    assert item["lat"] == "37.476296"
+    assert item["lng"] == "126.9583876"
+    assert item["output"] == "50"
+    assert item["year"] == "2017"
+
+
+def test_real_info_items_keep_blank_and_whitespace_values_as_received(fixture_text: Load) -> None:
+    # GIVEN real getChargerInfo items with empty powerType and a space-prefixed addrDetail
+    text = fixture_text("real_info_page.json")
+
+    # WHEN it is parsed
+    items = {(i["statId"], i["chgerId"]): i for i in parse_response(text).items}
+
+    # THEN empty strings and leading whitespace are not normalized
+    assert items[("ME174013", "01")]["powerType"] == ""
+    assert items[("ME174013", "01")]["nowTsdt"] == ""
+    assert items[("ME174027", "01")]["addrDetail"] == " 1층 입구"
+
+
+def test_parsing_real_info_page_twice_yields_equal_results(fixture_text: Load) -> None:
+    # GIVEN a real getChargerInfo page
+    text = fixture_text("real_info_page.json")
+
+    # WHEN it is parsed twice
+    first, second = parse_response(text), parse_response(text)
+
+    # THEN the results are equal
+    assert first == second
+
+
+def test_real_no_data_is_a_normal_code_with_zero_count_and_no_items(fixture_text: Load) -> None:
+    # GIVEN the real empty result: resultCode "00", totalCount 0, items.item []
+    text = fixture_text("real_no_data.json")
+
+    # WHEN it is parsed
+    parsed = parse_response(text)
+
+    # THEN it is a normal, empty page (the real API does not send "03" here)
+    assert parsed.result_code == "00"
+    assert parsed.total_count == 0
+    assert parsed.items == []
