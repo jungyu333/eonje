@@ -52,6 +52,12 @@ class EvChargerClient:
         params: Mapping[str, str],
         max_pages: int | None = None,
     ) -> Iterator[Page]:
+        """1페이지의 totalCount로 마지막 페이지를 정하고, max_pages로 한 번 더 자른다.
+
+        max_pages는 페이지 수 상한이지 HTTP 호출 수 상한이 아니다. 페이지마다 최대
+        api_max_attempts번 시도하므로 최악의 호출 수는 max_pages * api_max_attempts다.
+        예산 판단은 이 최악값을 기준으로 해야 한다.
+        """
         if max_pages is not None and max_pages < 1:
             return
         first = self.fetch_page(operation, 1, params)
@@ -102,6 +108,7 @@ class EvChargerClient:
                 CallRecord(
                     operation=operation,
                     page_no=page_no,
+                    params={k: v for k, v in query.items() if k != "serviceKey"},
                     called_at=called_at,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                     attempt=attempt_no,

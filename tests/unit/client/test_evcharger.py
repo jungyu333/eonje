@@ -597,3 +597,39 @@ def test_iterating_twice_over_the_same_responses_yields_the_same_pages(
         return [(p.page_no, p.total_count, p.items) for p in pages]
 
     assert key(first) == key(second)
+
+
+# --- call record params -------------------------------------------------------
+
+
+def test_call_record_keeps_request_params_without_service_key(fixture_text: Load) -> None:
+    # GIVEN a client and a normal page response
+    client, _, records = _client([_ok(fixture_text("getChargerStatus_page.json"))])
+
+    # WHEN page 2 of getChargerStatus is fetched with a period filter
+    client.fetch_page("getChargerStatus", 2, {"period": "10"})
+
+    # THEN the record carries the query actually sent, minus the service key
+    (rec,) = records
+    assert dict(rec.params) == {
+        "period": "10",
+        "pageNo": "2",
+        "numOfRows": "500",
+        "dataType": "JSON",
+    }
+    assert SERVICE_KEY not in repr(rec)
+
+
+def test_every_attempt_records_the_same_params(fixture_text: Load) -> None:
+    # GIVEN a page that fails once with 500 and then succeeds
+    client, _, records = _client(
+        [httpx.Response(500), _ok(fixture_text("getChargerStatus_page.json"))]
+    )
+
+    # WHEN it is fetched with a zone filter
+    client.fetch_page("getChargerInfo", 1, {"zcode": "11"})
+
+    # THEN both attempts are recorded with the same params
+    assert [r.attempt for r in records] == [1, 2]
+    assert all(r.params["zcode"] == "11" for r in records)
+    assert all("serviceKey" not in r.params for r in records)
