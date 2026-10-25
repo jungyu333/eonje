@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug
 
 help:            ## 타깃 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n", $$1, $$2}'
