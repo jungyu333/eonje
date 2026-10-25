@@ -260,3 +260,19 @@ def test_scalar_item_raises_unexpected_response(item: object) -> None:
     # THEN it is reported as an unexpected response
     with pytest.raises(UnexpectedResponseError):
         parse_response(text)
+
+
+# --- real API responses (tests/fixtures/evcharger/real_*.json) ----------------
+
+
+def test_real_gateway_error_keeps_reason_code_and_message(fixture_text: Load) -> None:
+    # GIVEN the real response for an unregistered service key (dataType=JSON)
+    text = fixture_text("real_gateway_error.json")
+
+    # WHEN it is parsed
+    with pytest.raises(ApiError) as exc:
+        parse_response(text)
+
+    # THEN the gateway reason code and message survive for the call log
+    assert exc.value.result_code == "30"
+    assert "SERVICE_KEY_IS_NOT_REGISTERED_ERROR" in str(exc.value)

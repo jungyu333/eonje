@@ -1,0 +1,111 @@
+{
+    "items": {
+        "item": [
+            {
+                "busiId": "ME",
+                "statId": "ME174013",
+                "chgerId": "01",
+                "stat": "2",
+                "statUpdDt": "20261025180410",
+                "lastTsdt": "20261024115222",
+                "lastTedt": "20261024123529",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174027",
+                "chgerId": "01",
+                "stat": "2",
+                "statUpdDt": "20261025180422",
+                "lastTsdt": "20261025100316",
+                "lastTedt": "20261025104638",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174039",
+                "chgerId": "01",
+                "stat": "5",
+                "statUpdDt": "20261025180417",
+                "lastTsdt": "20261019013058",
+                "lastTedt": "20261019020029",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174046",
+                "chgerId": "01",
+                "stat": "2",
+                "statUpdDt": "20261025180544",
+                "lastTsdt": "20261022110017",
+                "lastTedt": "20261022114339",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174050",
+                "chgerId": "01",
+                "stat": "2",
+                "statUpdDt": "20261025180544",
+                "lastTsdt": "20261017164702",
+                "lastTedt": "20261017171742",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174050",
+                "chgerId": "02",
+                "stat": "2",
+                "statUpdDt": "20261025180428",
+                "lastTsdt": "20261025154308",
+                "lastTedt": "20261025162345",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174050",
+                "chgerId": "03",
+                "stat": "2",
+                "statUpdDt": "20261025180404",
+                "lastTsdt": "20261024065832",
+                "lastTedt": "20261024073126",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174050",
+                "chgerId": "04",
+                "stat": "2",
+                "statUpdDt": "20261025180357",
+                "lastTsdt": "20261024071902",
+                "lastTedt": "20261024075939",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174050",
+                "chgerId": "05",
+                "stat": "2",
+                "statUpdDt": "20261025180626",
+                "lastTsdt": "20261018143811",
+                "lastTedt": "20261018150616",
+                "nowTsdt": ""
+            },
+            {
+                "busiId": "ME",
+                "statId": "ME174062",
+                "chgerId": "01",
+                "stat": "2",
+                "statUpdDt": "20261025180549",
+                "lastTsdt": "20261025162019",
+                "lastTedt": "20261025170022",
+                "nowTsdt": ""
+            }
+        ]
+    },
+    "resultCode": "00",
+    "resultMsg": "NORMAL SERVICE.",
+    "totalCount": 16239,
+    "pageNo": 1,
+    "numOfRows": 10
+}
