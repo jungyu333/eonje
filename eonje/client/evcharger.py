@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 
 import httpx
@@ -45,6 +45,25 @@ class EvChargerClient:
                     operation, page_no, params, attempt.retry_state.attempt_number
                 )
         raise AssertionError("unreachable: Retrying either returns or reraises")
+
+    def iter_pages(
+        self,
+        operation: str,
+        params: Mapping[str, str],
+        max_pages: int | None = None,
+    ) -> Iterator[Page]:
+        if max_pages is not None and max_pages < 1:
+            return
+        first = self.fetch_page(operation, 1, params)
+        yield first
+
+        last = _page_count(first.total_count, self._settings.page_size)
+
+        if max_pages is not None:
+            last = min(last, max_pages)
+
+        for page_no in range(2, last + 1):
+            yield self.fetch_page(operation, page_no, params)
 
     def _call_once(
         self, operation: str, page_no: int, params: Mapping[str, str], attempt_no: int
@@ -91,3 +110,7 @@ class EvChargerClient:
                     total_count=total,
                 )
             )
+
+
+def _page_count(total_count: int, page_size: int) -> int:
+    return max(1, -(-total_count // page_size))
