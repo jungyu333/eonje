@@ -23,9 +23,11 @@ def parse_response(text: str) -> ParsedResponse:
     - NORMAL: totalCount와 items를 돌려준다
     - NO_DATA: 0건으로 돌려준다 (에러 아님)
     - 그 외 결과 코드: ApiError
+    - 게이트웨이 에러(키 미등록·트래픽 초과 등, OpenAPI_ServiceResponse 형태): ApiError
     - JSON이 아님(게이트웨이 XML 에러 등)·필수 필드 누락: UnexpectedResponseError
     """
     body = _load_json(text)
+    _raise_if_gateway_error(body)
     code = str(body.get("resultCode", ""))
     if code == NO_DATA:
         return ParsedResponse(code, 0, [])
@@ -42,6 +44,23 @@ def _load_json(text: str) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise UnexpectedResponseError(f"unexpected JSON root: {type(body).__name__}")
     return body
+
+
+def _raise_if_gateway_error(body: dict[str, Any]) -> None:
+    """공공데이터포털 게이트웨이 에러. dataType=JSON이면 resultCode 대신 이 형태로 온다.
+
+    {"OpenAPI_ServiceResponse": {"cmmMsgHeader": {"errMsg": ..., "returnReasonCode": "30"}}}
+    """
+    wrapper = body.get("OpenAPI_ServiceResponse")
+    if not isinstance(wrapper, dict):
+        return
+    header = wrapper.get("cmmMsgHeader")
+    if not isinstance(header, dict):
+        raise UnexpectedResponseError("gateway error without cmmMsgHeader")
+    raise ApiError(
+        str(header.get("returnReasonCode", "")),
+        str(header.get("errMsg") or header.get("returnAuthMsg") or ""),
+    )
 
 
 def _total_count(body: dict[str, Any]) -> int:
