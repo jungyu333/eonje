@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     api_base_url: str = "https://apis.data.go.kr/B552584/EvCharger"
     api_daily_limit: int = Field(default=1000, gt=0)
     page_size: int = Field(default=9999, gt=10, le=9999)
+    api_timeout_sec: float = Field(default=30.0, gt=0)
+    api_max_attempts: int = Field(default=3, ge=1, le=5)
 
     # 수집
     status_period_min: int = Field(default=10, ge=1, le=10)

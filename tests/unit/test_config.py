@@ -25,6 +25,8 @@ def test_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> None:
     assert settings.api_base_url == "https://apis.data.go.kr/B552584/EvCharger"
     assert settings.api_daily_limit == 1000
     assert settings.page_size == 9999
+    assert settings.api_timeout_sec == 30.0
+    assert settings.api_max_attempts == 3
     assert settings.status_period_min == 10
     assert settings.status_interval_min == 10
     assert settings.serve_zcodes == []
@@ -178,6 +180,97 @@ def test_status_interval_of_zero_is_rejected(
     monkeypatch.setenv("EONJE_STATUS_INTERVAL_MIN", "0")
 
     # WHEN / THEN loading fails
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_api_timeout_and_attempts_are_read_from_prefixed_env_vars(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN HTTP timeout and retry overrides under the EONJE_ prefix
+    monkeypatch.setenv("EONJE_API_TIMEOUT_SEC", "2.5")
+    monkeypatch.setenv("EONJE_API_MAX_ATTEMPTS", "5")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the overrides are applied and typed
+    assert settings.api_timeout_sec == 2.5
+    assert settings.api_max_attempts == 5
+
+
+def test_integer_api_timeout_from_env_example_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN the timeout written as an integer, as in infra/.env.example
+    monkeypatch.setenv("EONJE_API_TIMEOUT_SEC", "30")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is coerced to a float
+    assert settings.api_timeout_sec == 30.0
+    assert isinstance(settings.api_timeout_sec, float)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "-0.5"])
+def test_non_positive_api_timeout_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN an HTTP timeout that would fail every request immediately or be meaningless
+    monkeypatch.setenv("EONJE_API_TIMEOUT_SEC", value)
+
+    # WHEN / THEN loading fails
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+def test_small_positive_api_timeout_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a fractional timeout just above zero
+    monkeypatch.setenv("EONJE_API_TIMEOUT_SEC", "0.1")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as-is
+    assert settings.api_timeout_sec == 0.1
+
+
+@pytest.mark.parametrize("value", ["0", "6"])
+def test_api_max_attempts_outside_bounds_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN zero attempts (no call at all) or more than 5 (budget burn on retries)
+    monkeypatch.setenv("EONJE_API_MAX_ATTEMPTS", value)
+
+    # WHEN / THEN loading fails
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("value", ["1", "5"])
+def test_api_max_attempts_within_bounds_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN an attempt count at the inclusive edges of [1, 5]
+    monkeypatch.setenv("EONJE_API_MAX_ATTEMPTS", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as-is
+    assert settings.api_max_attempts == int(value)
+
+
+def test_fractional_api_max_attempts_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a non-integer attempt count
+    monkeypatch.setenv("EONJE_API_MAX_ATTEMPTS", "2.5")
+
+    # WHEN / THEN loading fails instead of silently truncating
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]
 
