@@ -1,6 +1,6 @@
 # 언제충전 (eonje)
 
-[![ci](https://github.com/jungyu333/eonje/actions/workflows/ci.yml/badge.svg)](https://github.com/jungyu333/eonje/actions/workflows/ci.yml)
+[![ci](https://github.com/jungyu333/eonje/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jungyu333/eonje/actions/workflows/ci.yml?query=branch%3Amain)
 
 전기차 충전기의 **이력**을 쌓아 "이 충전소는 언제 비는가"에 답하는 서비스.
 
