@@ -53,7 +53,7 @@ def test_job_receives_run_id_and_loaded_settings(
     run_id, settings = calls[0]
     assert run_id == "manual__x"
     assert isinstance(settings, Settings)
-    assert settings.api_server_key.get_secret_value() == api_key_env
+    assert settings.api_service_key.get_secret_value() == api_key_env
 
 
 @pytest.mark.parametrize("job_code", [0, 1])

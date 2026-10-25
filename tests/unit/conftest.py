@@ -22,5 +22,5 @@ def isolated_settings_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> It
 @pytest.fixture
 def api_key_env(monkeypatch: pytest.MonkeyPatch) -> str:
     key = "test-service-key"
-    monkeypatch.setenv("EONJE_API_SERVER_KEY", key)
+    monkeypatch.setenv("EONJE_API_SERVICE_KEY", key)
     return key

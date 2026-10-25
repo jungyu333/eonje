@@ -6,13 +6,13 @@ from pydantic import ValidationError
 from eonje.config import Settings, get_settings
 
 
-def test_missing_api_server_key_is_rejected() -> None:
-    # GIVEN no EONJE_API_SERVER_KEY in the environment or .env
+def test_missing_api_service_key_is_rejected() -> None:
+    # GIVEN no EONJE_API_SERVICE_KEY in the environment or .env
     # WHEN settings are loaded
     # THEN validation fails on the key field
     with pytest.raises(ValidationError) as exc:
         Settings()  # type: ignore[call-arg]
-    assert "api_server_key" in str(exc.value)
+    assert "api_service_key" in str(exc.value)
 
 
 def test_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> None:
@@ -21,7 +21,7 @@ def test_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> None:
     settings = Settings()  # type: ignore[call-arg]
 
     # THEN every other field takes its documented default
-    assert settings.api_server_key.get_secret_value() == api_key_env
+    assert settings.api_service_key.get_secret_value() == api_key_env
     assert settings.api_base_url == "https://apis.data.go.kr/B552584/EvCharger"
     assert settings.api_daily_limit == 1000
     assert settings.page_size == 9999
@@ -85,18 +85,18 @@ def test_unknown_prefixed_env_var_is_ignored(
 def test_values_are_read_from_dotenv_in_cwd(tmp_path: Path) -> None:
     # GIVEN a .env file in the working directory (cwd is tmp_path via conftest)
     (tmp_path / ".env").write_text(
-        "EONJE_API_SERVER_KEY=from-dotenv\nEONJE_API_DAILY_LIMIT=42\n", encoding="utf-8"
+        "EONJE_API_SERVICE_KEY=from-dotenv\nEONJE_API_DAILY_LIMIT=42\n", encoding="utf-8"
     )
 
     # WHEN settings are loaded
     settings = Settings()  # type: ignore[call-arg]
 
     # THEN values come from the file
-    assert settings.api_server_key.get_secret_value() == "from-dotenv"
+    assert settings.api_service_key.get_secret_value() == "from-dotenv"
     assert settings.api_daily_limit == 42
 
 
-def test_api_server_key_is_masked_in_repr(api_key_env: str) -> None:
+def test_api_service_key_is_masked_in_repr(api_key_env: str) -> None:
     # GIVEN loaded settings
     settings = Settings()  # type: ignore[call-arg]
 
@@ -145,16 +145,30 @@ def test_page_size_within_bounds_is_accepted(
     assert settings.page_size == int(value)
 
 
-@pytest.mark.parametrize("value", ["1", "11"])
+@pytest.mark.parametrize("value", ["0", "11"])
 def test_status_period_outside_bounds_is_rejected(
     api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    # GIVEN a status lookback period outside (1, 10]
+    # GIVEN a status lookback period outside the API range [1, 10]
     monkeypatch.setenv("EONJE_STATUS_PERIOD_MIN", value)
 
     # WHEN / THEN loading fails
     with pytest.raises(ValidationError):
         Settings()  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("value", ["1", "10"])
+def test_status_period_within_bounds_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a status lookback period at the inclusive edges of the API range
+    monkeypatch.setenv("EONJE_STATUS_PERIOD_MIN", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as-is
+    assert settings.status_period_min == int(value)
 
 
 def test_status_interval_of_zero_is_rejected(
