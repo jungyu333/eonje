@@ -56,7 +56,7 @@ build: pin pandas and pyarrow versions
 | `cli` | `eonje/cli/**` (app, registry, jobs) |
 | `api` | `api/**` |
 | `dags` | `dags/**` |
-| `infra` | `infra/**`, `Dockerfile` |
+| `infra` | `infra/**`, `docker/**` |
 | `web` | `web/**` |
 | (omitted) | Project-wide: root config, `.github/`, `docs/` |
 
