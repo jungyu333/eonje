@@ -1,8 +1,10 @@
 import argparse
 import sys
-from collections.abc import Sequence
+
+from pydantic import ValidationError
 
 from eonje.cli.registry import JOBS
+from eonje.config import get_settings
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,10 +17,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
     try:
-        return JOBS[args.job](args.run_id)
+        settings = get_settings()
+    except ValidationError as e:
+        print(f"invalid settings:\n{e}", file=sys.stderr)
+        return 2
+
+    try:
+        return JOBS[args.job](args.run_id, settings)
     except NotImplementedError as e:
-        print(f"{e}: not implemented (run_id={args.run_id})", file=sys.stderr)
+        print(str(e), file=sys.stderr)
         return 2
