@@ -3,6 +3,7 @@ import sys
 
 from pydantic import ValidationError
 
+from eonje.cli.logs import configure_logging
 from eonje.cli.registry import JOBS
 from eonje.config import get_settings
 
@@ -19,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    configure_logging()
 
     try:
         settings = get_settings()
