@@ -1,0 +1,15 @@
+{
+  "resultMsg": "정상",
+  "totalCount": 4,
+  "items": {
+    "item": [
+      {"busiId": "ME", "statId": "ME174013", "chgerId": "01", "stat": "3", "statUpdDt": "20261009140512", "lastTsdt": "20261009140511", "lastTedt": "20261009123000", "nowTsdt": "20261009140511"},
+      {"busiId": "ME", "statId": "ME174013", "chgerId": "01", "stat": "3", "statUpdDt": "20261009140512", "lastTsdt": "20261009140511", "lastTedt": "20261009123000", "nowTsdt": "20261009140511"},
+      {"busiId": "PI", "statId": "PI795111", "chgerId": "02", "stat": "7", "statUpdDt": "20261009140001", "lastTsdt": "", "lastTedt": "", "nowTsdt": "", "maker": "XX"},
+      {"busiId": "EV", "statId": "EV000001", "chgerId": "03", "stat": "", "statUpdDt": "20261009135959", "lastTsdt": "20261009110000", "lastTedt": "", "nowTsdt": ""}
+    ]
+  },
+  "pageNo": 1,
+  "resultCode": "00",
+  "numOfRows": 9999
+}
