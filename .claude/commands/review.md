@@ -24,6 +24,12 @@ Review the current branch against `main` following the project's boundary and da
 - [ ] Settings are read via `config.py`, not `os.environ` scattered in code (DAG files excepted)
 - [ ] `__init__.py` files are empty; `cli/jobs/*` contain wiring only, no business logic
 
+### Spark
+- [ ] Spark I/O only via `s3a://` and JDBC (no local paths); SparkSession and I/O live in `storage/`
+- [ ] No `collect()` / `toPandas()` on large DataFrames
+- [ ] `spark.sql.session.timeZone` is set explicitly
+- [ ] Transforms process all unprocessed raw runs (watermark), not only the current run
+
 ### Data Correctness
 - [ ] Raw writes keep all response fields as strings; no filtering or type conversion before storage
 - [ ] Every task is idempotent for its `run_id` (overwrite / on-conflict / delete-window-then-recompute)
