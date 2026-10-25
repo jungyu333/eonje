@@ -53,7 +53,7 @@ build: pin pandas and pyarrow versions
 | `storage` | `eonje/storage/**` (raw, models, db) |
 | `transform` | `eonje/transform/**` |
 | `codes` | `eonje/codes/**` |
-| `cli` | `eonje/cli.py` |
+| `cli` | `eonje/cli/**` (app, registry, jobs) |
 | `api` | `api/**` |
 | `dags` | `dags/**` |
 | `infra` | `infra/**`, `Dockerfile` |
