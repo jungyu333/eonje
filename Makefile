@@ -1,6 +1,8 @@
 .DEFAULT_GOAL := help
 .PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug
 
+TAG ?= dev
+
 help:            ## 타깃 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n", $$1, $$2}'
 
@@ -33,7 +35,7 @@ test-pdb:        ## 첫 실패 지점에서 pdb 진입
 check: lint typecheck test   ## CI와 동일한 전체 검사
 
 build:           ## eonje 이미지 빌드
-	docker build -t eonje:dev .
+	docker build -f docker/tasks/collector/Dockerfile -t eonje-collector:$(TAG) .
 
 run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x
 	uv run python -m eonje.cli $(JOB) --run-id $(RUN_ID)

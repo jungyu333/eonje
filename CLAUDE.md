@@ -68,7 +68,8 @@ docs/         # design.md, requirements.md
 
 ## Runtime & Deployment
 
-- Images per runtime under `docker/`; image name = folder name (`eonje-collector`, `eonje-spark`, `eonje-ml`, `eonje-api`).
+- Images per runtime under `docker/`; image name = folder name (`eonje-collector`, `eonje-spark`, `eonje-ml`,
+  `eonje-api`).
   Same entrypoint everywhere: `python -m eonje.cli <job> --run-id <id>`. Airflow's image never contains eonje or Spark.
 - Images are pushed to GHCR tagged with the git sha. **No code on servers**: a node holds only `compose.yaml`, `.env`,
   and volumes. DAGs reach Airflow via GitDagBundle tracking the `deploy` ref, which CD moves after images are pushed.
@@ -95,7 +96,7 @@ make hooks        # pre-commit install (once per clone)
 make check        # lint + typecheck + test — same as CI
 make test ARGS="-k cli"
 make test-debug   # -x -vv -l -s, stop at first failure with locals
-make build        # docker build eonje:dev
+make build        # build runtime images under docker/ (eonje-collector:dev)
 make run JOB=fetch-delta RUN_ID=manual__x
 ```
 
