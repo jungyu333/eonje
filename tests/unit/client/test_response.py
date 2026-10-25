@@ -150,6 +150,8 @@ def test_missing_items_key_yields_no_items() -> None:
 
 def test_no_data_result_code_is_an_empty_page_not_an_error(fixture_text: Load) -> None:
     # GIVEN resultCode 03 (NODATA) without totalCount
+    # (documented code; the live API answered an empty query with 00 + empty list instead,
+    #  see real_no_data.json — this case guards the documented shape)
     text = fixture_text("getChargerStatus_no_data.json")
 
     # WHEN it is parsed
