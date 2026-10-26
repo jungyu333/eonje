@@ -298,7 +298,10 @@ def test_storage_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> No
     assert settings.s3_endpoint_url == "http://localhost:9000"
     assert settings.s3_access_key is None
     assert settings.s3_secret_key is None
-    assert settings.database_url == "postgresql+psycopg://eonje:eonje@localhost:5432/eonje"
+    assert (
+        settings.database_url.get_secret_value()
+        == "postgresql+psycopg://eonje:eonje@localhost:5432/eonje"
+    )
 
 
 def test_storage_values_are_read_from_prefixed_env_vars(
@@ -458,3 +461,47 @@ def test_loading_storage_settings_twice_yields_equal_values(
 
     # THEN both loads agree
     assert first == second
+
+
+def test_database_url_is_read_from_prefixed_env_var(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a database URL under the EONJE_ prefix
+    url = "postgresql+psycopg://eonje:pw@postgres:5432/eonje"
+    monkeypatch.setenv("EONJE_DATABASE_URL", url)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the URL is wrapped as a secret holding the exact value
+    assert settings.database_url.get_secret_value() == url
+
+
+def test_database_url_password_is_masked_in_repr(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a database URL carrying a password
+    monkeypatch.setenv(
+        "EONJE_DATABASE_URL", "postgresql+psycopg://eonje:db-pw-should-not-leak@postgres/eonje"
+    )
+    settings = Settings()  # type: ignore[call-arg]
+
+    # WHEN the settings object is rendered (e.g. in a log line)
+    rendered = repr(settings) + str(settings)
+
+    # THEN the password does not leak
+    assert "db-pw-should-not-leak" not in rendered
+
+
+def test_env_example_database_url_is_loaded(api_key_env: str, tmp_path: Path) -> None:
+    # GIVEN infra/.env.example copied verbatim as the .env in cwd
+    (tmp_path / ".env").write_text(ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the example database URL points at the compose postgres service
+    assert (
+        settings.database_url.get_secret_value()
+        == "postgresql+psycopg://eonje:CHANGE_ME@postgres:5432/eonje"
+    )

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = "http://localhost:9000"  # MinIO. 컨테이너 안에서는 http://minio:9000
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
-    database_url: str = "postgresql+psycopg://eonje:eonje@localhost:5432/eonje"
+    database_url: SecretStr = SecretStr("postgresql+psycopg://eonje:eonje@localhost:5432/eonje")
 
     @field_validator("api_service_key", mode="before")
     @classmethod
