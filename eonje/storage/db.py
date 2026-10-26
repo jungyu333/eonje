@@ -15,6 +15,7 @@ def make_engine(settings: Settings) -> Engine:
         pool_pre_ping=True,
         pool_size=2,
         max_overflow=2,
+        connect_args={"connect_timeout": 10},
     )
 
 
