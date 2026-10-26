@@ -18,6 +18,6 @@ Hard rules:
 - Do not comment on style that ruff already enforces.
 
 ## Output language
-- Write reports, questions, review findings, and summaries addressed to the user in the language the user is using (Korean if the user writes in Korean).
+- Write reports, questions, review findings, and summaries addressed to the user in **Korean**. You do not see the user's chat, so do not infer the language from the task prompt.
 - Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
 - When editing an existing file, keep the file's own language (`docs/` is written in Korean).
