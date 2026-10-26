@@ -24,8 +24,8 @@ _META_NAMES = frozenset(f.name for f in META_FIELDS)
 
 def page_table(page: Page, collected_at: datetime) -> pa.Table:
     """Page → Arrow 테이블. 순수 함수. 시각은 시간대가 있어야 하고 UTC로 저장된다."""
-    _require_aware("collected_at", collected_at)
-    _require_aware("page.fetched_at", page.fetched_at)
+    require_aware("collected_at", collected_at)
+    require_aware("page.fetched_at", page.fetched_at)
     columns = _field_names(page.items)
     clash = _META_NAMES.intersection(columns)
 
@@ -55,7 +55,7 @@ def write_page(
     return path
 
 
-def _require_aware(name: str, value: datetime) -> None:
+def require_aware(name: str, value: datetime) -> None:
     """시간대 없는 시각은 거부한다. KST를 naive로 넘기면 9시간 어긋난 채 조용히 저장되므로."""
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware: {value!r}")
