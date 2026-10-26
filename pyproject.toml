@@ -40,7 +40,7 @@ strict = true
 packages = ["eonje"]
 
 [[tool.mypy.overrides]]
-module = ["s3fs", "s3fs.*"]
+module = ["s3fs", "s3fs.*", "fsspec", "fsspec.*", "pyarrow", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

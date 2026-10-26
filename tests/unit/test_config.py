@@ -283,3 +283,178 @@ def test_get_settings_returns_the_same_instance_on_repeat_calls(api_key_env: str
 
     # THEN the cached instance is reused
     assert first is second
+
+
+ENV_EXAMPLE = Path(__file__).resolve().parents[2] / "infra" / ".env.example"
+
+
+def test_storage_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> None:
+    # GIVEN only the required API key is set
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN storage fields take their documented local-dev defaults
+    assert settings.raw_bucket == "eonje-raw"
+    assert settings.s3_endpoint_url == "http://localhost:9000"
+    assert settings.s3_access_key is None
+    assert settings.s3_secret_key is None
+    assert settings.database_url == "postgresql+psycopg://eonje:eonje@localhost:5432/eonje"
+
+
+def test_storage_values_are_read_from_prefixed_env_vars(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN storage overrides under the EONJE_ prefix
+    monkeypatch.setenv("EONJE_RAW_BUCKET", "eonje-raw-test")
+    monkeypatch.setenv("EONJE_S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("EONJE_S3_ACCESS_KEY", "access-id")
+    monkeypatch.setenv("EONJE_S3_SECRET_KEY", "secret-value")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the overrides are applied, with credentials wrapped as secrets
+    assert settings.raw_bucket == "eonje-raw-test"
+    assert settings.s3_endpoint_url == "http://minio:9000"
+    assert settings.s3_access_key is not None
+    assert settings.s3_access_key.get_secret_value() == "access-id"
+    assert settings.s3_secret_key is not None
+    assert settings.s3_secret_key.get_secret_value() == "secret-value"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "ab",
+        "s3a://eonje-raw",
+        "s3://eonje-raw",
+        "Eonje-raw",
+        "eonje_raw",
+        "-eonje-raw",
+        "eonje-raw-",
+        "a" * 64,
+    ],
+)
+def test_invalid_raw_bucket_name_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a value that is not an S3 bucket name (too short/long, URL scheme, case, symbols)
+    monkeypatch.setenv("EONJE_RAW_BUCKET", value)
+
+    # WHEN / THEN loading fails on the bucket field
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "raw_bucket" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["abc", "eonje-raw", "eonje.raw.2026", "a" * 63])
+def test_valid_raw_bucket_name_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a valid S3 bucket name, including the 3- and 63-char edges
+    monkeypatch.setenv("EONJE_RAW_BUCKET", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as-is
+    assert settings.raw_bucket == value
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_s3_credentials_are_treated_as_unset(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN S3 credential variables present but blank, as in an unfilled .env
+    monkeypatch.setenv("EONJE_S3_ACCESS_KEY", value)
+    monkeypatch.setenv("EONJE_S3_SECRET_KEY", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN both are None, not an empty secret
+    assert settings.s3_access_key is None
+    assert settings.s3_secret_key is None
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_api_service_key_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    # GIVEN the API key variable present but empty
+    monkeypatch.setenv("EONJE_API_SERVICE_KEY", value)
+
+    # WHEN / THEN loading fails at startup, not at the first API call
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "api_service_key" in str(exc.value)
+
+
+def test_s3_credentials_are_masked_in_repr(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN S3 credentials in the environment
+    monkeypatch.setenv("EONJE_S3_ACCESS_KEY", "access-id-should-not-leak")
+    monkeypatch.setenv("EONJE_S3_SECRET_KEY", "secret-should-not-leak")
+    settings = Settings()  # type: ignore[call-arg]
+
+    # WHEN the settings object is rendered (e.g. in a log line)
+    rendered = repr(settings) + str(settings)
+
+    # THEN neither credential leaks
+    assert "access-id-should-not-leak" not in rendered
+    assert "secret-should-not-leak" not in rendered
+
+
+def test_legacy_raw_root_env_var_does_not_break_loading(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a node .env still carrying the removed EONJE_RAW_ROOT
+    monkeypatch.setenv("EONJE_RAW_ROOT", "s3a://eonje-raw")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN loading succeeds, the stale value is not attached, and the bucket default holds
+    assert not hasattr(settings, "raw_root")
+    assert settings.raw_bucket == "eonje-raw"
+
+
+def test_env_example_with_only_the_api_key_filled_loads(api_key_env: str, tmp_path: Path) -> None:
+    # GIVEN infra/.env.example copied verbatim as the .env in cwd, with the API key supplied
+    (tmp_path / ".env").write_text(ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN every example value validates, the quoted endpoint is unquoted,
+    # and the unfilled S3 credentials count as unset
+    assert settings.raw_bucket == "eonje-raw"
+    assert settings.s3_endpoint_url == "http://minio:9000"
+    assert settings.serve_zcodes == ["11"]
+    assert settings.s3_access_key is None
+    assert settings.s3_secret_key is None
+
+
+def test_env_example_without_filling_the_api_key_is_rejected(tmp_path: Path) -> None:
+    # GIVEN infra/.env.example copied verbatim, API key left blank
+    (tmp_path / ".env").write_text(ENV_EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # WHEN / THEN loading fails, pointing at the key that must be filled in
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "api_service_key" in str(exc.value)
+
+
+def test_loading_storage_settings_twice_yields_equal_values(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a fixed storage environment
+    monkeypatch.setenv("EONJE_RAW_BUCKET", "eonje-raw-test")
+    monkeypatch.setenv("EONJE_S3_SECRET_KEY", "secret-value")
+
+    # WHEN settings are loaded twice, independently
+    first = Settings()  # type: ignore[call-arg]
+    second = Settings()  # type: ignore[call-arg]
+
+    # THEN both loads agree
+    assert first == second

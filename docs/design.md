@@ -302,11 +302,28 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 ## 6. 데이터 모델
 
-### 원본 (Parquet, 날짜 파티션, append-only)
+### 원본 (Parquet, MinIO, run 단위)
 
-- `raw/charger_info/dt=YYYY-MM-DD/run=<ts>/page=NNN.parquet` — 응답 item 그대로 + `collected_at`, `page_fetched_at`, `page_no`
-- `raw/charger_status/dt=YYYY-MM-DD/run=<ts>/page=NNN.parquet` — 동일
-- 응답 스키마 변경에 대비해 컬럼은 전부 문자열로 보존. 타입 변환은 정제 단계에서.
+경로 (`storage/raw_paths.py`). 버킷은 `EONJE_RAW_BUCKET`, 접속은 `EONJE_S3_ENDPOINT_URL`·`EONJE_S3_ACCESS_KEY`·`EONJE_S3_SECRET_KEY`. 경로에는 스킴이 없고, 수집기(s3fs)는 그대로, Spark는 `s3a://`를 붙여 쓴다.
+
+```
+{bucket}/charger_status/dt=YYYY-MM-DD/run=<run_key>/page=NNN.parquet
+{bucket}/charger_status/dt=YYYY-MM-DD/run=<run_key>/_manifest.json
+{bucket}/charger_info/...   (같은 구조)
+```
+
+- **`dt`는 수집 시각(`collected_at`)의 KST 날짜**(`partition_date`). 기록기가 `run.dt`와 맞지 않으면 거부한다 → 같은 run이 두 날짜 파티션에 생기지 않는다
+- `run_key`는 경로에 안전한 문자만(`[0-9A-Za-z_.-]`). Airflow run_id에서 결정적으로 만든다 (#8)
+- 컬럼: 응답 item의 필드 전부를 **string**으로 받은 그대로(미지 필드 유지, 문자열이 아닌 JSON 값은 JSON 표기 그대로) + 메타 `collected_at`(timestamp UTC), `page_fetched_at`(timestamp UTC), `page_no`(int32). 타입 변환은 정제 단계에서
+- 스키마는 페이지에 나온 필드로 정해져 페이지·run마다 컬럼 구성이 다를 수 있다. Spark는 `mergeSchema`로 읽는다 (전부 string이라 타입 충돌 없음)
+- 시각은 모두 시간대가 있어야 하고 UTC로 저장한다. 시간대 없는 시각은 거부
+
+쓰기 규칙 (`storage/raw.py`, `storage/raw_run.py`):
+- 페이지는 메모리 버퍼에 Parquet(zstd)으로 다 쓴 뒤 한 번에 올린다 → 실패하면 객체가 생기지 않는다
+- run은 `start → write × N → finish`. `start`는 **manifest를 먼저 지우고** run 폴더를 비운다(재실행 때 지난 페이지가 남지 않음). `finish`는 모든 페이지를 쓴 뒤 **`_manifest.json`을 마지막에** 쓴다
+- **manifest가 있는 run만 완료된 run이다.** 읽는 쪽(Spark 워터마크)은 manifest가 없는 run을 건너뛴다. 중간 실패·정리 실패 모두 manifest가 없는 상태로 남는다
+- manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않아 같은 run이면 내용이 같다. `row_count < total_count`면 예산 상한으로 잘린 run
+- 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 
 ### 서빙·정제 (Postgres `eonje` DB, `storage/models.py`)
 
@@ -498,6 +515,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - B 추가 후 A의 Spark worker 유지(2워커) 여부
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
 - `ev_status_10min`의 Spark 태스크를 한 앱으로 묶을지 (소요 시간 측정 후)
+- 원본 run을 재수집하면 이미 변환된 run의 내용이 바뀔 수 있다. 워터마크는 run_key만이 아니라 manifest 기준(collected_at, 내용 해시 등)으로 잡을지 — 4단계 변환 설계 때
 
 ## 13. 코드표 (설계에 쓰는 것만)
 
