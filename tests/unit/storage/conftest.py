@@ -4,7 +4,12 @@ from typing import Any
 
 import pytest
 from fsspec.implementations.memory import MemoryFileSystem
+from sqlalchemy import Table
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.engine import Dialect
+from sqlalchemy.schema import CreateIndex, CreateTable
 
+from eonje.storage.models import Base
 from eonje.storage.raw_paths import Dataset, RawRun
 
 
@@ -38,3 +43,23 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr("eonje.storage.fs.s3fs.S3FileSystem", fake)
     return seen
+
+
+@pytest.fixture
+def pg_dialect() -> Dialect:
+    return postgresql.dialect()  # type: ignore[no-untyped-call]
+
+
+@pytest.fixture
+def api_call_log() -> Table:
+    return Base.metadata.tables["api_call_log"]
+
+
+@pytest.fixture
+def api_call_log_ddl(api_call_log: Table, pg_dialect: Dialect) -> str:
+    return str(CreateTable(api_call_log).compile(dialect=pg_dialect))
+
+
+@pytest.fixture
+def api_call_log_index_ddl(api_call_log: Table, pg_dialect: Dialect) -> list[str]:
+    return sorted(str(CreateIndex(ix).compile(dialect=pg_dialect)) for ix in api_call_log.indexes)
