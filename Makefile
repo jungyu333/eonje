@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -49,3 +49,9 @@ down:            ## 로컬 인프라 중지 (데이터 볼륨 유지)
 
 psql:            ## eonje DB에 psql 접속
 	$(COMPOSE) exec postgres psql -U eonje -d eonje
+
+migrate:         ## 마이그레이션 적용 (head까지)
+	uv run alembic upgrade head
+
+migration:       ## 새 리비전 생성. 예: make migration MSG="add dim tables"
+	uv run alembic revision --autogenerate -m "$(MSG)"
