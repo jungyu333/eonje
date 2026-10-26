@@ -435,7 +435,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 ### 8.4 공개와 접근
 
 - 공유기 포트포워딩 없음. 외부에서 들어오는 포트는 0개
-- 공개: Cloudflare Tunnel. `cloudflared`가 Cloudflare로 나가는 연결을 열어 두고, 요청은 그 터널로 `eonje-api`에 전달. DNS·HTTPS·기본 DDoS 방어·정적 캐시는 Cloudflare(무료 플랜). 도메인은 서비스 공개(7단계) 때 구입
+- 공개: Cloudflare Tunnel. `cloudflared`가 Cloudflare로 나가는 연결을 열어 두고, 요청은 그 터널로 `eonje-api`에 전달. DNS·HTTPS·기본 DDoS 방어·정적 캐시는 Cloudflare(무료 플랜). 도메인은 서비스 공개(8단계) 때 구입
 - 관리: Tailscale. SSH, Airflow·Spark·MinIO 콘솔·Grafana는 tailnet 안에서만. 서버 노드는 키 만료를 끈다
 - SSH: 키 로그인만 (비밀번호·root 로그인 차단)
 
@@ -490,13 +490,13 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 | 단계 | 내용 | 엔진 | 노드 |
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
-| 2 | 수집기 배포: `check_budget`·`fetch_delta` + CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | `ev_master_daily` + 차원 테이블 + 첫 Alembic 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
+| 2 | 수집기 배포: API 클라이언트, 원본 저장(MinIO), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `check_budget`·`fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
+| 3 | `ev_master_daily` + 차원 테이블과 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환). 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
-| 7 | 서비스 공개 (Cloudflare Tunnel, 도메인, 출처 표기, 운영자 알림) | — | A |
-| 8 | 프론트 | — | 미결 (12장) |
+| 7 | 프론트 (개발 PC와 Tailscale 안에서 API에 붙여 확인) | — | A |
+| 8 | 서비스 공개: FE 배포 방식 결정(12장), 도메인, Cloudflare Tunnel, 출처 표기, 운영자 알림 | — | A |
 | 9 | 예측 (베이스라인 → 모델) | Spark 피처 + LightGBM | 피처 A+B, 학습 B |
 
 ## 12. 미결
