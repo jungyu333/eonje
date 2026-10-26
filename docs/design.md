@@ -338,7 +338,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 | `agg_occupancy_hourly` | `stat_id, chger_id, dow, hour` | 점유율(충전중 비율), 관측 수, 세션 수, 평균 세션 길이 |
 | `agg_station_hourly` | `stat_id, dow, hour` | 충전소 단위 (충전기 합산) |
 | `agg_abnormal` | `stat_id, chger_id` | 비정상 상태(1·4·5·9) 시작 시각, 지속 일수 |
-| `api_call_log` | `called_at` | 오퍼레이션, 파라미터, `total_count`, 페이지, 응답 시간, 결과 코드 |
+| `api_call_log` | `id` (PK), 인덱스 `called_at` | EvCharger API HTTP 시도 1회 = 1행 (재시도 포함, 일일 한도 계산 기준). `called_at`, `job`, `run_id`(Airflow 원문), `operation`, `page_no`, `attempt`, `params`(JSONB, serviceKey 제외), `http_status`, `result_code`, `total_count`, `elapsed_ms` |
 | `ml_model` | `name, version` | 모델 파일 경로(MinIO), 학습 구간, 정확도, 운영 버전 여부 (9단계) |
 | `pred_*` | 대상별 | 매시 배치 추론 결과. API는 이 테이블만 읽음 (9단계) |
 | `ref_code_*` | 코드, 버전 | 상태·충전기타입·지역·시설·기관 코드표 |
