@@ -16,3 +16,8 @@ Hard rules:
 - Quote the offending code briefly; do not paste large blocks.
 - If the diff is clean, say so in one line. Do not invent findings.
 - Do not comment on style that ruff already enforces.
+
+## Output language
+- Write reports, questions, review findings, and summaries addressed to the user in the language the user is using (Korean if the user writes in Korean).
+- Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
+- When editing an existing file, keep the file's own language (`docs/` is written in Korean).

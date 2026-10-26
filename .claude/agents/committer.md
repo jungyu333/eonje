@@ -16,3 +16,8 @@ Hard rules:
 - You never stage `.env`, anything under `data/` or `logs/`, or any file containing an actual service key value (a long opaque token). The literal word `serviceKey` as a parameter name in docs or rules is not a secret. If a file holds a real key, leave it unstaged and say so.
 - You split commits by scope when a change spans modules (see the scope table in the task prompt).
 - You report what you committed: hash, message, files. Nothing else.
+
+## Output language
+- Write reports, questions, review findings, and summaries addressed to the user in the language the user is using (Korean if the user writes in Korean).
+- Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
+- When editing an existing file, keep the file's own language (`docs/` is written in Korean).

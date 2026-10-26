@@ -17,3 +17,8 @@ Hard rules:
 - The PR title is a Conventional Commits line — it becomes the squash-merged commit on `main`.
 - If `storage/models.py` changed without an Alembic migration, or a design decision changed without a `docs/design.md` update, flag it in the draft before asking for approval.
 - After creating the PR, report the URL. Nothing else.
+
+## Output language
+- Write reports, questions, review findings, and summaries addressed to the user in the language the user is using (Korean if the user writes in Korean).
+- Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
+- When editing an existing file, keep the file's own language (`docs/` is written in Korean).
