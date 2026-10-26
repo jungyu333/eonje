@@ -53,6 +53,7 @@ docs/         # design.md, requirements.md
   recompute.
 - `statUpdDt` is **not** a transition time (operator-dependent heartbeat). Transitions are derived by comparing against
   `charger_state`.
+- All timestamps are timezone-aware. Naive datetimes are rejected at the storage boundary; stored values are UTC.
 - Unknown status codes are stored, never rejected. Do not hardcode status enums; map at aggregation time via `codes/`.
 - Missing observation windows are "unknown", not "available". They never enter an occupancy denominator.
 - The daily API limit (`EONJE_API_DAILY_LIMIT`) must never be exceeded. Every call is logged to `api_call_log`;
