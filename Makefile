@@ -1,7 +1,8 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql
 
 TAG ?= dev
+COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
 
 help:            ## 타깃 목록
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n", $$1, $$2}'
@@ -39,3 +40,12 @@ build:           ## eonje 이미지 빌드
 
 run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x
 	uv run python -m eonje.cli $(JOB) --run-id $(RUN_ID)
+
+up:              ## 로컬 인프라 시작 (healthcheck 통과까지 대기)
+	$(COMPOSE) up -d --wait
+
+down:            ## 로컬 인프라 중지 (데이터 볼륨 유지)
+	$(COMPOSE) down
+
+psql:            ## eonje DB에 psql 접속
+	$(COMPOSE) exec postgres psql -U eonje -d eonje
