@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from eonje.config import Settings, get_settings
+from eonje.config import DatabaseSettings, Settings, get_database_settings, get_settings
 
 
 def test_missing_api_service_key_is_rejected() -> None:
@@ -505,3 +505,60 @@ def test_env_example_database_url_is_loaded(api_key_env: str, tmp_path: Path) ->
         settings.database_url.get_secret_value()
         == "postgresql+psycopg://eonje:CHANGE_ME@postgres:5432/eonje"
     )
+
+
+def test_database_settings_load_without_an_api_key() -> None:
+    # GIVEN no EONJE_API_SERVICE_KEY and no EONJE_DATABASE_URL
+    # WHEN database-only settings are loaded
+    settings = DatabaseSettings()
+
+    # THEN loading succeeds with the local-dev default URL
+    assert (
+        settings.database_url.get_secret_value()
+        == "postgresql+psycopg://eonje:eonje@localhost:5432/eonje"
+    )
+
+
+def test_database_url_env_var_is_seen_identically_by_both_settings_classes(
+    api_key_env: str, database_url_env: str
+) -> None:
+    # GIVEN EONJE_DATABASE_URL set (and the API key, so Settings can load)
+    # WHEN both settings classes are loaded
+    db_settings = DatabaseSettings()
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN both hold the same URL
+    assert db_settings.database_url.get_secret_value() == database_url_env
+    assert settings.database_url.get_secret_value() == database_url_env
+
+
+def test_database_settings_repr_does_not_leak_the_password(database_url_env: str) -> None:
+    # GIVEN database settings whose URL carries a password
+    settings = DatabaseSettings()
+
+    # WHEN the settings object is rendered (e.g. in a log line)
+    rendered = repr(settings) + str(settings)
+
+    # THEN the password does not leak
+    assert "db-pw-should-not-leak" not in rendered
+
+
+def test_get_database_settings_returns_the_same_instance_on_repeat_calls() -> None:
+    # GIVEN no API key in the environment
+    # WHEN get_database_settings is called twice
+    first = get_database_settings()
+    second = get_database_settings()
+
+    # THEN the cached instance is reused
+    assert first is second
+
+
+def test_settings_still_require_the_api_key_after_the_database_split(
+    database_url_env: str,
+) -> None:
+    # GIVEN a database URL but no API key
+    # WHEN the full settings are loaded
+    # THEN validation still fails on the key field
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "api_service_key" in str(exc.value)

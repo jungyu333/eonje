@@ -6,9 +6,13 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EONJE_", env_file=".env", extra="ignore")
 
+    database_url: SecretStr = SecretStr("postgresql+psycopg://eonje:eonje@localhost:5432/eonje")
+
+
+class Settings(DatabaseSettings):
     # API
     api_service_key: SecretStr = Field(min_length=1)
     api_base_url: str = "https://apis.data.go.kr/B552584/EvCharger"
@@ -28,7 +32,6 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = "http://localhost:9000"  # MinIO. 컨테이너 안에서는 http://minio:9000
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
-    database_url: SecretStr = SecretStr("postgresql+psycopg://eonje:eonje@localhost:5432/eonje")
 
     @field_validator("api_service_key", mode="before")
     @classmethod
@@ -46,3 +49,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+@lru_cache
+def get_database_settings() -> DatabaseSettings:
+    return DatabaseSettings()
