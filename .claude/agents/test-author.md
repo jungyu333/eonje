@@ -28,3 +28,8 @@ Hard rules:
 - No network, no real DB in unit tests. Mock `httpx` at the transport level; mock DB access at the `storage/db.py` boundary.
 - No test relies on wall-clock time; pass timestamps explicitly or freeze them.
 - Do not test ruff-enforced style or type hints.
+
+## Output language
+- Write reports, questions, review findings, and summaries addressed to the user in the language the user is using (Korean if the user writes in Korean).
+- Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
+- When editing an existing file, keep the file's own language (`docs/` is written in Korean).
