@@ -16,7 +16,7 @@ from fsspec import AbstractFileSystem
 
 from eonje.client.types import Page
 from eonje.storage.raw import require_aware, write_page
-from eonje.storage.raw_paths import RawRun, manifest_path, run_prefix
+from eonje.storage.raw_paths import RawRun, manifest_path, partition_date, run_prefix
 
 MANIFEST_VERSION = 1
 
@@ -39,6 +39,11 @@ class RawRunWriter:
         self, fs: AbstractFileSystem, bucket: str, run: RawRun, collected_at: datetime
     ) -> None:
         require_aware("collected_at", collected_at)
+        expected_dt = partition_date(collected_at)
+        if run.dt != expected_dt:
+            raise ValueError(
+                f"run.dt {run.dt} does not match the KST date of collected_at ({expected_dt})"
+            )
         self._fs = fs
         self._bucket = bucket
         self._run = run
@@ -50,6 +55,10 @@ class RawRunWriter:
         self._pages: list[int] = []
 
     def start(self) -> None:
+        # manifest를 먼저 지운다. 이후 페이지 삭제가 중간에 실패해도 run은 '미완료'로 남는다
+        manifest = manifest_path(self._bucket, self._run)
+        if self._fs.exists(manifest):
+            self._fs.rm_file(manifest)
         prefix = run_prefix(self._bucket, self._run)
         if self._fs.exists(prefix):
             self._fs.rm(prefix, recursive=True)

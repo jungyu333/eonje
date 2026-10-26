@@ -1,15 +1,15 @@
 import dataclasses
-from datetime import date
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
 from eonje.storage.raw_paths import (
-    DATASET_BY_OPERATION,
     MAX_PAGE_NO,
     Dataset,
     RawRun,
     manifest_path,
     page_path,
+    partition_date,
     run_prefix,
 )
 
@@ -191,25 +191,32 @@ def test_equal_raw_runs_are_equal_and_hash_equal() -> None:
     assert len({a, b}) == 1
 
 
-# --- DATASET_BY_OPERATION -------------------------------------------------------------
+# --- partition_date -------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("operation", "dataset"),
+    ("collected_at", "expected"),
     [
-        ("getChargerStatus", Dataset.CHARGER_STATUS),
-        ("getChargerInfo", Dataset.CHARGER_INFO),
+        (datetime(2026, 10, 26, 14, 59, 59, tzinfo=UTC), date(2026, 10, 26)),  # 23:59:59 KST
+        (datetime(2026, 10, 26, 15, 0, 0, tzinfo=UTC), date(2026, 10, 27)),  # 00:00 KST
+        (datetime(2026, 10, 26, 0, 30, 0, tzinfo=UTC), date(2026, 10, 26)),  # 09:30 KST
+        (
+            datetime(2026, 10, 27, 0, 10, 0, tzinfo=timezone(timedelta(hours=9))),
+            date(2026, 10, 27),
+        ),
     ],
 )
-def test_api_operations_map_to_their_raw_dataset(operation: str, dataset: Dataset) -> None:
-    # GIVEN an EvCharger API operation name
-    # WHEN looked up
-    # THEN it maps to the raw dataset of the same kind
-    assert DATASET_BY_OPERATION[operation] is dataset
+def test_partition_date_is_the_kst_date_of_collected_at(
+    collected_at: datetime, expected: date
+) -> None:
+    # GIVEN a timezone-aware collection time
+    # WHEN its partition date is computed
+    # THEN it is the calendar date in KST, regardless of the input's offset
+    assert partition_date(collected_at) == expected
 
 
-def test_every_dataset_is_reachable_from_exactly_one_operation() -> None:
-    # GIVEN the dataset enum and the operation mapping
-    # WHEN their values are compared
-    # THEN every dataset appears exactly once
-    assert sorted(DATASET_BY_OPERATION.values()) == sorted(Dataset)
+def test_partition_date_rejects_a_naive_time() -> None:
+    # GIVEN a collection time without a timezone
+    # WHEN / THEN it is rejected instead of guessing KST or UTC
+    with pytest.raises(ValueError, match="timezone-aware"):
+        partition_date(datetime(2026, 10, 26, 0, 10, 0))

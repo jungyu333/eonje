@@ -108,8 +108,9 @@ def test_start_does_not_touch_other_runs(
     # GIVEN a completed sibling run on the same day and a run on another day
     sibling = RawRun(dataset=run.dataset, dt=run.dt, run_key="20261026T100000")
     other_day = RawRun(dataset=run.dataset, dt=date(2026, 10, 25), run_key=run.run_key)
-    for r in (sibling, other_day):
-        w = _started(mem_fs, r)
+    other_day_at = datetime(2026, 10, 25, 10, 10, 0, tzinfo=UTC)
+    for r, at in ((sibling, COLLECTED_AT), (other_day, other_day_at)):
+        w = _started(mem_fs, r, collected_at=at)
         w.write(_page(status_items))
         w.finish()
     before = _objects(mem_fs, f"{BUCKET}/")
@@ -132,6 +133,45 @@ def test_start_does_not_remove_a_run_whose_key_shares_a_prefix(
     _started(mem_fs, run)
     # THEN the longer-keyed run survives
     assert _objects(mem_fs, f"{BUCKET}/") == before
+
+
+def test_writer_rejects_a_run_dt_that_is_not_the_kst_date_of_collected_at(
+    mem_fs: MemoryFileSystem, run: RawRun
+) -> None:
+    # GIVEN 2026-10-26 16:00 UTC, which is already 2026-10-27 in KST, and a run dated 10-26
+    collected_at = datetime(2026, 10, 26, 16, 0, 0, tzinfo=UTC)
+
+    # WHEN / THEN the writer refuses, so one run cannot land in two date partitions
+    with pytest.raises(ValueError, match="KST date"):
+        RawRunWriter(mem_fs, BUCKET, run, collected_at)
+
+
+def test_start_after_a_failed_cleanup_leaves_the_run_incomplete(
+    mem_fs: MemoryFileSystem,
+    run: RawRun,
+    status_items: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GIVEN a completed earlier attempt with three pages and a manifest
+    first = _started(mem_fs, run)
+    for n in (1, 2, 3):
+        first.write(_page(status_items, page_no=n))
+    first.finish()
+
+    # AND deleting the page objects fails part-way (after the manifest is removed)
+    def failing_rm(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("simulated partial delete failure")
+
+    monkeypatch.setattr(mem_fs, "rm", failing_rm)
+
+    # WHEN the run is retried
+    retry = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT)
+    with pytest.raises(OSError):
+        retry.start()
+
+    # THEN stale pages may remain, but the run no longer looks complete
+    assert read_manifest(mem_fs, BUCKET, run) is None
+    assert any(p.endswith(".parquet") for p in _objects(mem_fs, f"{BUCKET}/"))
 
 
 # --- write ----------------------------------------------------------------------------
