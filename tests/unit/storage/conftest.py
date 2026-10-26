@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from datetime import date
+from typing import Any
 
 import pytest
 from fsspec.implementations.memory import MemoryFileSystem
@@ -25,3 +26,15 @@ def _reset(fs: MemoryFileSystem) -> None:
 @pytest.fixture
 def run() -> RawRun:
     return RawRun(dataset=Dataset.CHARGER_STATUS, dt=date(2026, 10, 26), run_key="20261026T101000")
+
+
+@pytest.fixture
+def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def fake(**kwargs: Any) -> object:
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("eonje.storage.fs.s3fs.S3FileSystem", fake)
+    return seen
