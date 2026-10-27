@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -27,7 +27,7 @@ typecheck:       ## mypy
 test:            ## pytest. 예: make test ARGS="-k cli"
 	uv run pytest $(ARGS)
 
-test-db:
+test-db:         ## DB 테스트 (make up 필요)
 	uv run pytest -m db tests/db $(ARGS)
 
 test-debug:      ## 첫 실패에서 멈추고 로컬 변수·전체 출력 표시
@@ -44,8 +44,8 @@ build:           ## eonje 이미지 빌드
 run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x
 	uv run python -m eonje.cli $(JOB) --run-id $(RUN_ID)
 
-up:              ## 로컬 인프라 시작 (healthcheck 통과까지 대기)
-	$(COMPOSE) up -d --wait
+up:              ## 로컬 인프라 시작. 일부만: make up SERVICES=postgres
+	$(COMPOSE) up -d --wait $(SERVICES)
 
 down:            ## 로컬 인프라 중지 (데이터 볼륨 유지)
 	$(COMPOSE) down
@@ -58,3 +58,6 @@ migrate:         ## 마이그레이션 적용 (head까지)
 
 migration:       ## 새 리비전 생성. 예: make migration MSG="add dim tables"
 	uv run alembic revision --autogenerate -m "$(MSG)"
+
+migration-check: ## models.py와 마이그레이션이 일치하는지 (DB 필요)
+	uv run alembic check
