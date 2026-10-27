@@ -135,6 +135,38 @@ def test_negative_used_today_is_rejected() -> None:
         _decide(used_today=-1)
 
 
+@pytest.mark.parametrize("daily_limit", [0, -1])
+def test_non_positive_daily_limit_is_rejected(daily_limit: int) -> None:
+    # GIVEN a limit that allows no calls
+    # WHEN / THEN deciding raises instead of silently skipping forever
+    with pytest.raises(ValueError, match="daily_limit"):
+        _decide(daily_limit=daily_limit)
+
+
+@pytest.mark.parametrize("safety_ratio", [0.0, -0.1, 1.01, 2.0])
+def test_safety_ratio_outside_unit_interval_is_rejected(safety_ratio: float) -> None:
+    # GIVEN a ratio outside (0, 1] (above 1 would allow exceeding the limit)
+    # WHEN / THEN deciding raises
+    with pytest.raises(ValueError, match="safety_ratio"):
+        _decide(safety_ratio=safety_ratio)
+
+
+def test_negative_reserve_is_rejected() -> None:
+    # GIVEN a negative reserve (would inflate the budget)
+    # WHEN / THEN deciding raises
+    with pytest.raises(ValueError, match="reserve_calls"):
+        _decide(reserve_calls=-1)
+
+
+def test_ratio_is_applied_exactly_without_float_rounding() -> None:
+    # GIVEN 100 * 0.29, which is 28.999... in float arithmetic
+    # WHEN deciding with one attempt per page
+    decision = _decide(daily_limit=100, safety_ratio=0.29, max_attempts=1)
+
+    # THEN the ceiling is exactly 29, not 28
+    assert decision.usable_calls == 29
+
+
 def test_deciding_twice_on_the_same_input_yields_the_same_decision() -> None:
     # GIVEN fixed inputs
     # WHEN deciding twice

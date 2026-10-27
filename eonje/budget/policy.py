@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from eonje.timeutil import KST, require_aware
 
@@ -32,10 +32,19 @@ def decide(
     max_attempts: int,
 ) -> BudgetDecision:
     """최악의 경우(페이지마다 max_attempts번 시도)에도 한도 안에 들도록 페이지 상한을 정한다."""
-    if used_today < 0 or max_attempts < 1:
-        raise ValueError("used_today must be >= 0 and max_attempts >= 1")
+    if daily_limit < 1:
+        raise ValueError(f"daily_limit must be >= 1: {daily_limit}")
+    if not 0 < safety_ratio <= 1:
+        raise ValueError(f"safety_ratio must be in (0, 1]: {safety_ratio}")
+    if reserve_calls < 0:
+        raise ValueError(f"reserve_calls must be >= 0: {reserve_calls}")
+    if used_today < 0:
+        raise ValueError(f"used_today must be >= 0: {used_today}")
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1: {max_attempts}")
 
-    ceiling = math.floor(daily_limit * safety_ratio) - reserve_calls
+    # Decimal(str(...)): 0.95를 적힌 그대로 계산한다 (float 곱셈은 가끔 1 작게 나온다)
+    ceiling = int(Decimal(str(safety_ratio)) * daily_limit) - reserve_calls
     usable = max(0, ceiling - used_today)
     pages = usable // max_attempts
 
