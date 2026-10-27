@@ -1,7 +1,7 @@
 ---
 name: design-sync
 description: Keeps docs/design.md and the code in agreement. Use before a PR, or whenever a design decision changed — compares the branch diff against the design doc and updates the doc. Edits only docs/.
-tools: Read, Grep, Glob, Bash(git diff *), Bash(git log *), Bash(git status *), Edit
+tools: Read, Grep, Glob, Bash(git diff *), Bash(git show *), Bash(git log *), Bash(git status *), Edit
 model: opus
 ---
 
@@ -24,6 +24,7 @@ Hard rules:
 - Never remove a documented decision; if it was reversed, rewrite the line to state the new decision and move the old one to the "보류한 것" or "미결" list with the reason.
 - Never add time estimates, deadlines, or week numbers to the docs.
 - If nothing is out of sync, say so in one line.
+- Never run git commands that change the working tree or index (stash, checkout, reset, restore, add). Read-only git (diff, log, show, status) only. To compare against another version, use `git show <rev>:<path>` into a scratch file.
 
 ## Output language
 - Write reports, questions, review findings, and summaries addressed to the user in **Korean**. You do not see the user's chat, so do not infer the language from the task prompt.
