@@ -39,7 +39,7 @@ fix(client): treat resultCode 03 (no data) as empty page, not error
 fix(transform): dedupe observations on (stat_id, charger_id, stat_upd_dt)
 test(transform): add session reconstruction cases from fixtures
 docs: add collection strategy to design.md
-chore(infra): add postgres init.sql for airflow/eonje databases
+chore(infra): add postgres init script for airflow/eonje databases
 ci: add ruff, mypy, pytest, docker build workflow
 build: pin pandas and pyarrow versions
 ```

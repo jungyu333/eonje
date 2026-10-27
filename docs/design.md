@@ -119,7 +119,7 @@ eonje/
   infra/
     compose.node-a.yaml   # 상시 노드: airflow, postgres, minio, spark master·worker, eonje-api, cloudflared. 개발 PC도 이것을 사용
     compose.node-b.yaml   # 보조 노드: spark worker, 모니터링, 로컬 백업 (B 추가 시)
-    postgres/init.sql     # 첫 기동 시 airflow·eonje DB와 역할 생성 (compose configs로 주입)
+    postgres/init.sh      # 첫 기동 시 airflow·eonje DB와 역할 생성. 비밀번호는 .env (compose configs로 주입)
     migrations/           # Alembic — models.py에서 autogenerate, 검토 후 커밋
     .env.example
   tests/
@@ -182,7 +182,7 @@ flowchart TB
 - **원칙: 상태를 가진 것(Postgres·MinIO)과 수집 경로·Airflow는 A에만 둔다.** B가 꺼져도 A의 수집은 계속되고, B는 A를 계산·감시·보관하는 보조 노드다. 서비스 배치는 고정 (8.1)
 - **공유기 포트는 열지 않는다.** 공개 트래픽은 Cloudflare Tunnel(나가는 연결)로 `eonje-api`에만, 관리 접근(SSH·Airflow·Spark·MinIO 콘솔·Grafana)은 Tailscale로만
 - 로컬 개발 PC는 `compose.node-a.yaml`을 그대로 쓰고 Spark는 `local[*]`. 차이는 `.env`뿐
-- **Postgres는 인스턴스 하나, 데이터베이스 둘**(`airflow`, `eonje`)에 역할도 둘. `init.sql`로 첫 기동 시 생성. Airflow 메타DB를 초기화·교체해도 `eonje` DB는 무관하고, 백업은 DB 단위 `pg_dump`
+- **Postgres는 인스턴스 하나, 데이터베이스 둘**(`airflow`, `eonje`)에 역할도 둘. `init.sh`로 첫 기동 시 생성(역할 비밀번호는 `.env`에서 받아 레포에 남지 않음). Airflow 메타DB를 초기화·교체해도 `eonje` DB는 무관하고, 백업은 DB 단위 `pg_dump`
 - 원본 저장소는 MinIO(S3 호환). `storage/`는 s3fs(수집)·s3a(Spark)로 다루므로 외부 객체 스토리지로 옮겨도 엔드포인트만 교체
 
 ### 2.6 처리 흐름 요약
@@ -423,7 +423,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 + docker 볼륨     # Postgres·MinIO 데이터
 ```
 
-- 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sql` 등)은 compose `configs:`에 넣는다
+- 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
 - **CI** (PR): ruff, mypy, pytest, 이미지 빌드(푸시 없음)
 - **CD** (main 머지):
   1. 이미지 빌드 → GHCR에 `<git-sha>` 태그로 푸시

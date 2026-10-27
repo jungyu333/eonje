@@ -23,7 +23,7 @@ eonje/        # Pure Python package. Never imports airflow.
 api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.models.
 dags/         # Thin Airflow DAGs. @task.docker calling eonje.cli only. Loaded via GitDagBundle (deploy ref).
 docker/       # One Dockerfile per runtime image: tasks/collector, tasks/spark, tasks/ml, api
-infra/        # compose.node-a.yaml, compose.node-b.yaml, postgres/init.sql, migrations/ (Alembic), .env.example
+infra/        # compose.node-a.yaml, compose.node-b.yaml, postgres/init.sh, migrations/ (Alembic), .env.example
 tests/        # unit/ (no Airflow, no network; Spark via local session), fixtures/ (real API responses, keys removed)
 docs/         # design.md, requirements.md
 ```
