@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -26,6 +26,9 @@ typecheck:       ## mypy
 
 test:            ## pytest. 예: make test ARGS="-k cli"
 	uv run pytest $(ARGS)
+
+test-db:
+	uv run pytest -m db tests/db $(ARGS)
 
 test-debug:      ## 첫 실패에서 멈추고 로컬 변수·전체 출력 표시
 	uv run pytest -x -vv -l -s --tb=long $(ARGS)
