@@ -6,10 +6,14 @@ from contextlib import contextmanager
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from eonje.config import Settings
+from eonje.config import DatabaseSettings
 
 
-def make_engine(settings: Settings) -> Engine:
+def make_engine(settings: DatabaseSettings) -> Engine:
+    """DB URL만 쓴다. API 키 없이 로드되는 DatabaseSettings로 충분하다.
+
+    Settings도 DatabaseSettings의 하위 클래스라 그대로 넘길 수 있다.
+    """
     return create_engine(
         settings.database_url.get_secret_value(),
         pool_pre_ping=True,

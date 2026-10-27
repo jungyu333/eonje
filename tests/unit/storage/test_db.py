@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from eonje.config import Settings
+from eonje.config import DatabaseSettings, Settings
 from eonje.storage.db import make_engine, make_session_factory, session_scope
 
 DB_PASSWORD = "db-pw-should-not-leak"
@@ -55,6 +55,19 @@ def test_engine_receives_the_unwrapped_database_url(captured_engine_kwargs: dict
     # THEN create_engine gets the plain string, not the SecretStr
     assert captured_engine_kwargs["url"] == DB_URL
     assert isinstance(captured_engine_kwargs["url"], str)
+
+
+def test_engine_can_be_built_from_database_settings_without_an_api_key(
+    captured_engine_kwargs: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN only a database URL in the environment (no API key)
+    monkeypatch.setenv("EONJE_DATABASE_URL", DB_URL)
+
+    # WHEN the engine is built from DatabaseSettings
+    make_engine(DatabaseSettings())
+
+    # THEN it gets the URL; DB-only tools need no API key
+    assert captured_engine_kwargs["url"] == DB_URL
 
 
 def test_engine_uses_a_small_pre_pinged_pool(captured_engine_kwargs: dict[str, Any]) -> None:
