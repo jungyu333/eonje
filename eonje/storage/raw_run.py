@@ -15,8 +15,9 @@ from datetime import UTC, datetime
 from fsspec import AbstractFileSystem
 
 from eonje.client.types import Page
-from eonje.storage.raw import require_aware, write_page
+from eonje.storage.raw import write_page
 from eonje.storage.raw_paths import RawRun, manifest_path, partition_date, run_prefix
+from eonje.timeutil import require_aware
 
 MANIFEST_VERSION = 1
 

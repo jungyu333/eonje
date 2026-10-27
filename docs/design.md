@@ -119,7 +119,7 @@ eonje/
   infra/
     compose.node-a.yaml   # 상시 노드: airflow, postgres, minio, spark master·worker, eonje-api, cloudflared. 개발 PC도 이것을 사용
     compose.node-b.yaml   # 보조 노드: spark worker, 모니터링, 로컬 백업 (B 추가 시)
-    postgres/init.sql     # 첫 기동 시 airflow·eonje DB와 역할 생성 (compose configs로 주입)
+    postgres/init.sh      # 첫 기동 시 airflow·eonje DB와 역할 생성. 비밀번호는 .env (compose configs로 주입)
     migrations/           # Alembic — models.py에서 autogenerate, 검토 후 커밋
     .env.example
   tests/
@@ -182,7 +182,7 @@ flowchart TB
 - **원칙: 상태를 가진 것(Postgres·MinIO)과 수집 경로·Airflow는 A에만 둔다.** B가 꺼져도 A의 수집은 계속되고, B는 A를 계산·감시·보관하는 보조 노드다. 서비스 배치는 고정 (8.1)
 - **공유기 포트는 열지 않는다.** 공개 트래픽은 Cloudflare Tunnel(나가는 연결)로 `eonje-api`에만, 관리 접근(SSH·Airflow·Spark·MinIO 콘솔·Grafana)은 Tailscale로만
 - 로컬 개발 PC는 `compose.node-a.yaml`을 그대로 쓰고 Spark는 `local[*]`. 차이는 `.env`뿐
-- **Postgres는 인스턴스 하나, 데이터베이스 둘**(`airflow`, `eonje`)에 역할도 둘. `init.sql`로 첫 기동 시 생성. Airflow 메타DB를 초기화·교체해도 `eonje` DB는 무관하고, 백업은 DB 단위 `pg_dump`
+- **Postgres는 인스턴스 하나, 데이터베이스 둘**(`airflow`, `eonje`)에 역할도 둘. `init.sh`로 첫 기동 시 생성(역할 비밀번호는 `.env`에서 받아 레포에 남지 않음). Airflow 메타DB를 초기화·교체해도 `eonje` DB는 무관하고, 백업은 DB 단위 `pg_dump`
 - 원본 저장소는 MinIO(S3 호환). `storage/`는 s3fs(수집)·s3a(Spark)로 다루므로 외부 객체 스토리지로 옮겨도 엔드포인트만 교체
 
 ### 2.6 처리 흐름 요약
@@ -296,7 +296,12 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 - 초기값 10분 간격. 며칠 `totalCount` 분포(특히 저녁 피크)를 쌓은 뒤 간격 조정. 5분 간격은 최대 917회로 한도에 붙어 보류.
 - `period=10`에 10분 간격이면 겹침이 없다. 호출 실패 시 그 10분의 전이는 잃지만 `lastTsdt`/`lastTedt`로 세션은 다음 관측에서 복원됨. 겹침(5분 간격)으로 가면 `(statId, chgerId, statUpdDt)` 중복 제거 필수 — 지금부터 넣어 둔다.
-- **예산 관리자**: 호출마다 `api_call_log`에 기록. 상태 DAG는 실행 시 오늘 사용량을 읽어 남은 예산이 하루 잔여 실행 횟수 × 예상 페이지 수에 못 미치면 건너뛰거나 페이지 수를 제한한다. 마스터 DAG는 상태 DAG보다 우선.
+- **예산 관리자** (`budget/policy.py`, 순수 함수):
+  - 모든 HTTP 시도(재시도 포함)를 시도마다 독립 트랜잭션으로 `api_call_log`에 기록한다. 태스크가 롤백돼도 기록은 남는다 (기록이 사라지면 사용량을 적게 센다)
+  - "오늘"은 KST 자정 기준 하루 `[00:00, 다음 날 00:00)`
+  - 상한 = `floor(EONJE_API_DAILY_LIMIT × EONJE_BUDGET_SAFETY_RATIO) − EONJE_BUDGET_RESERVE_CALLS`. 기본 1000 × 0.95 − 0 = 950 (NFR-01: 한도 95% 전에 멈춤)
+  - 남은 호출 = 상한 − 오늘 사용량. 페이지마다 최대 `api_max_attempts`번 시도하므로 **페이지 상한 = 남은 호출 // api_max_attempts**. 재시도가 몰려도 한도를 넘을 수 없다. 1페이지도 안 되면 그 run은 호출 없이 건너뛴다
+  - 첫 버전(2단계)의 단순화: 남은 호출을 지금 run에 모두 허용한다. 평소 사용량(하루 약 485회)이 상한보다 한참 낮아서다. **잔여 실행 횟수에 맞춘 배분은 5단계**, **마스터 DAG 몫 예약(`EONJE_BUDGET_RESERVE_CALLS`를 마스터 1회분 = 53 × api_max_attempts 이상으로)은 마스터 수집이 생기는 3단계**에서
 - 페이지 사이 상태 변화: 한 수집 안에서 페이지가 다른 시각에 조회되므로, 관측 시각은 페이지 응답 시각이 아니라 **수집 시작 시각(버킷)**으로 통일. 원본에는 페이지 응답 시각도 남김.
 - 스냅샷 보정: 마스터 전체 조회의 `stat`를 기준점으로 삼아, 변경분으로 추적 중인 상태와 불일치하는 충전기를 찾아 보정 이벤트를 만든다 (놓친 전이의 사후 기록). 불일치 비율을 지표로 남긴다.
 
@@ -338,7 +343,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 | `agg_occupancy_hourly` | `stat_id, chger_id, dow, hour` | 점유율(충전중 비율), 관측 수, 세션 수, 평균 세션 길이 |
 | `agg_station_hourly` | `stat_id, dow, hour` | 충전소 단위 (충전기 합산) |
 | `agg_abnormal` | `stat_id, chger_id` | 비정상 상태(1·4·5·9) 시작 시각, 지속 일수 |
-| `api_call_log` | `called_at` | 오퍼레이션, 파라미터, `total_count`, 페이지, 응답 시간, 결과 코드 |
+| `api_call_log` | `id` (PK), 인덱스 `called_at` | EvCharger API HTTP 시도 1회 = 1행 (재시도 포함, 일일 한도 계산 기준). `called_at`, `job`, `run_id`(Airflow 원문), `operation`, `page_no`, `attempt`, `params`(JSONB, serviceKey 제외), `http_status`, `result_code`, `total_count`, `elapsed_ms` |
 | `ml_model` | `name, version` | 모델 파일 경로(MinIO), 학습 구간, 정확도, 운영 버전 여부 (9단계) |
 | `pred_*` | 대상별 | 매시 배치 추론 결과. API는 이 테이블만 읽음 (9단계) |
 | `ref_code_*` | 코드, 버전 | 상태·충전기타입·지역·시설·기관 코드표 |
@@ -418,7 +423,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 + docker 볼륨     # Postgres·MinIO 데이터
 ```
 
-- 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sql` 등)은 compose `configs:`에 넣는다
+- 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
 - **CI** (PR): ruff, mypy, pytest, 이미지 빌드(푸시 없음)
 - **CD** (main 머지):
   1. 이미지 빌드 → GHCR에 `<git-sha>` 태그로 푸시
@@ -435,7 +440,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 ### 8.4 공개와 접근
 
 - 공유기 포트포워딩 없음. 외부에서 들어오는 포트는 0개
-- 공개: Cloudflare Tunnel. `cloudflared`가 Cloudflare로 나가는 연결을 열어 두고, 요청은 그 터널로 `eonje-api`에 전달. DNS·HTTPS·기본 DDoS 방어·정적 캐시는 Cloudflare(무료 플랜). 도메인은 서비스 공개(7단계) 때 구입
+- 공개: Cloudflare Tunnel. `cloudflared`가 Cloudflare로 나가는 연결을 열어 두고, 요청은 그 터널로 `eonje-api`에 전달. DNS·HTTPS·기본 DDoS 방어·정적 캐시는 Cloudflare(무료 플랜). 도메인은 서비스 공개(8단계) 때 구입
 - 관리: Tailscale. SSH, Airflow·Spark·MinIO 콘솔·Grafana는 tailnet 안에서만. 서버 노드는 키 만료를 끈다
 - SSH: 키 로그인만 (비밀번호·root 로그인 차단)
 
@@ -490,13 +495,13 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 | 단계 | 내용 | 엔진 | 노드 |
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
-| 2 | 수집기 배포: `check_budget`·`fetch_delta` + CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | `ev_master_daily` + 차원 테이블 + 첫 Alembic 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
+| 2 | 수집기 배포: API 클라이언트, 원본 저장(MinIO), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `check_budget`·`fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
+| 3 | `ev_master_daily` + 차원 테이블과 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환). 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
-| 7 | 서비스 공개 (Cloudflare Tunnel, 도메인, 출처 표기, 운영자 알림) | — | A |
-| 8 | 프론트 | — | 미결 (12장) |
+| 7 | 프론트 (개발 PC와 Tailscale 안에서 API에 붙여 확인) | — | A |
+| 8 | 서비스 공개: FE 배포 방식 결정(12장), 도메인, Cloudflare Tunnel, 출처 표기, 운영자 알림 | — | A |
 | 9 | 예측 (베이스라인 → 모델) | Spark 피처 + LightGBM | 피처 A+B, 학습 B |
 
 ## 12. 미결

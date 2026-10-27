@@ -16,6 +16,7 @@ from fsspec import AbstractFileSystem
 
 from eonje.client.types import Page
 from eonje.storage.raw_paths import RawRun, page_path
+from eonje.timeutil import require_aware
 
 META_FIELDS = (
     pa.field("collected_at", pa.timestamp("us", tz="UTC"), nullable=False),
@@ -57,12 +58,6 @@ def write_page(
 
     fs.pipe_file(path, buf.getvalue().to_pybytes())
     return path
-
-
-def require_aware(name: str, value: datetime) -> None:
-    """시간대 없는 시각은 거부한다. KST를 naive로 넘기면 9시간 어긋난 채 조용히 저장되므로."""
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError(f"{name} must be timezone-aware: {value!r}")
 
 
 def _field_names(items: list[dict[str, Any]]) -> list[str]:

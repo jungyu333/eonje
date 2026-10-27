@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from eonje.config import get_settings
+from eonje.config import get_database_settings, get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -15,8 +15,10 @@ def isolated_settings_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> It
             monkeypatch.delenv(name)
     monkeypatch.chdir(tmp_path)  # Settings reads ".env" relative to cwd
     get_settings.cache_clear()
+    get_database_settings.cache_clear()
     yield
     get_settings.cache_clear()
+    get_database_settings.cache_clear()
 
 
 @pytest.fixture
@@ -24,3 +26,10 @@ def api_key_env(monkeypatch: pytest.MonkeyPatch) -> str:
     key = "test-service-key"
     monkeypatch.setenv("EONJE_API_SERVICE_KEY", key)
     return key
+
+
+@pytest.fixture
+def database_url_env(monkeypatch: pytest.MonkeyPatch) -> str:
+    url = "postgresql+psycopg://eonje:db-pw-should-not-leak@postgres:5432/eonje"
+    monkeypatch.setenv("EONJE_DATABASE_URL", url)
+    return url

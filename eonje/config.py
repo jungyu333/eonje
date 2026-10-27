@@ -6,9 +6,13 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class Settings(BaseSettings):
+class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EONJE_", env_file=".env", extra="ignore")
 
+    database_url: SecretStr = SecretStr("postgresql+psycopg://eonje:eonje@localhost:5432/eonje")
+
+
+class Settings(DatabaseSettings):
     # API
     api_service_key: SecretStr = Field(min_length=1)
     api_base_url: str = "https://apis.data.go.kr/B552584/EvCharger"
@@ -16,6 +20,8 @@ class Settings(BaseSettings):
     page_size: int = Field(default=9999, gt=10, le=9999)
     api_timeout_sec: float = Field(default=30.0, gt=0)
     api_max_attempts: int = Field(default=3, ge=1, le=5)
+    budget_safety_ratio: float = Field(default=0.95, gt=0, le=1)
+    budget_reserve_calls: int = Field(default=0, ge=0)
 
     # 수집
     status_period_min: int = Field(default=10, ge=1, le=10)
@@ -28,7 +34,6 @@ class Settings(BaseSettings):
     s3_endpoint_url: str = "http://localhost:9000"  # MinIO. 컨테이너 안에서는 http://minio:9000
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
-    database_url: str = "postgresql+psycopg://eonje:eonje@localhost:5432/eonje"
 
     @field_validator("api_service_key", mode="before")
     @classmethod
@@ -46,3 +51,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+@lru_cache
+def get_database_settings() -> DatabaseSettings:
+    return DatabaseSettings()

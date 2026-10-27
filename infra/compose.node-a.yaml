@@ -1,0 +1,30 @@
+name: eonje
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      EONJE_DB_PASSWORD: ${EONJE_DB_PASSWORD:?set EONJE_DB_PASSWORD in .env}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD:?set AIRFLOW_DB_PASSWORD in .env}
+    ports:
+      - "${POSTGRES_BIND:-127.0.0.1}:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    configs:
+      - source: pg_init
+        target: /docker-entrypoint-initdb.d/init.sh
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+configs:
+  pg_init:
+    file: ./postgres/init.sh
+
+volumes:
+  pgdata:

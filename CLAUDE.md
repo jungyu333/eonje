@@ -23,7 +23,7 @@ eonje/        # Pure Python package. Never imports airflow.
 api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.models.
 dags/         # Thin Airflow DAGs. @task.docker calling eonje.cli only. Loaded via GitDagBundle (deploy ref).
 docker/       # One Dockerfile per runtime image: tasks/collector, tasks/spark, tasks/ml, api
-infra/        # compose.node-a.yaml, compose.node-b.yaml, postgres/init.sql, migrations/ (Alembic), .env.example
+infra/        # compose.node-a.yaml, compose.node-b.yaml, postgres/init.sh, migrations/ (Alembic), .env.example
 tests/        # unit/ (no Airflow, no network; Spark via local session), fixtures/ (real API responses, keys removed)
 docs/         # design.md, requirements.md
 ```
@@ -102,7 +102,7 @@ make run JOB=fetch-delta RUN_ID=manual__x
 ```
 
 ## Output Language
-- Write reports, questions, review findings, and summaries addressed to the user in the language the user is using (Korean if the user writes in Korean).
+- Write reports, questions, review findings, and summaries addressed to the user in **Korean**.
 - Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
 - When editing an existing file, keep the file's own language (`docs/` is written in Korean).
 

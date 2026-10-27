@@ -5,6 +5,11 @@ on:
   push:
     branches: [ main ]
 
+# A newer push to the same branch/PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -37,3 +42,36 @@ jobs:
           docker run --rm -e EONJE_API_SERVICE_KEY=dummy eonje-collector:ci fetch-delta --run-id ci__smoke
           code=$?
           test "$code" -eq 2
+
+  db:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Throwaway credentials for a Postgres that lives only for this job.
+      # No API key: DB tests load DatabaseSettings only.
+      - name: write .env for ci
+        run: |
+          cat > .env <<'EOF'
+          POSTGRES_USER=postgres
+          POSTGRES_PASSWORD=ci-postgres
+          POSTGRES_BIND=127.0.0.1
+          EONJE_DB_PASSWORD=ci-eonje
+          AIRFLOW_DB_PASSWORD=ci-airflow
+          EONJE_DATABASE_URL=postgresql+psycopg://eonje:ci-eonje@127.0.0.1:5432/eonje
+          EOF
+
+      # Same compose file and init.sh as the dev PC and node A.
+      - run: make up SERVICES=postgres
+      - run: make install
+      - run: make migrate
+      - run: make migration-check
+      - run: make test-db
+
+      - name: postgres logs on failure
+        if: failure()
+        run: docker compose -f infra/compose.node-a.yaml --env-file .env logs postgres
