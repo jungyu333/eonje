@@ -275,6 +275,81 @@ def test_fractional_api_max_attempts_is_rejected(
         Settings()  # type: ignore[call-arg]
 
 
+def test_budget_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> None:
+    # GIVEN only the required key is set
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the budget fields take their documented defaults
+    assert settings.budget_safety_ratio == 0.95
+    assert settings.budget_reserve_calls == 0
+
+
+@pytest.mark.parametrize("value", ["0", "-0.1", "1.01", "2"])
+def test_budget_safety_ratio_outside_bounds_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a ratio that allows no calls or permits exceeding the daily limit
+    monkeypatch.setenv("EONJE_BUDGET_SAFETY_RATIO", value)
+
+    # WHEN / THEN loading fails on the ratio field
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "budget_safety_ratio" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["0.01", "0.95", "1", "1.0"])
+def test_budget_safety_ratio_within_bounds_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a ratio in (0, 1], including the inclusive upper edge
+    monkeypatch.setenv("EONJE_BUDGET_SAFETY_RATIO", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as a float
+    assert settings.budget_safety_ratio == float(value)
+
+
+@pytest.mark.parametrize("value", ["-1", "-160"])
+def test_negative_budget_reserve_calls_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a negative reserve, which would raise the ceiling above limit x ratio
+    monkeypatch.setenv("EONJE_BUDGET_RESERVE_CALLS", value)
+
+    # WHEN / THEN loading fails on the reserve field
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "budget_reserve_calls" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["0", "160"])
+def test_non_negative_budget_reserve_calls_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN no reserve (the default and the .env.example value) or a positive reserve
+    monkeypatch.setenv("EONJE_BUDGET_RESERVE_CALLS", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as-is
+    assert settings.budget_reserve_calls == int(value)
+
+
+def test_fractional_budget_reserve_calls_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a non-integer reserve
+    monkeypatch.setenv("EONJE_BUDGET_RESERVE_CALLS", "1.5")
+
+    # WHEN / THEN loading fails instead of silently truncating
+    with pytest.raises(ValidationError):
+        Settings()  # type: ignore[call-arg]
+
+
 def test_get_settings_returns_the_same_instance_on_repeat_calls(api_key_env: str) -> None:
     # GIVEN valid environment
     # WHEN get_settings is called twice

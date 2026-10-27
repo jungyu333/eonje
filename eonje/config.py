@@ -20,6 +20,8 @@ class Settings(DatabaseSettings):
     page_size: int = Field(default=9999, gt=10, le=9999)
     api_timeout_sec: float = Field(default=30.0, gt=0)
     api_max_attempts: int = Field(default=3, ge=1, le=5)
+    budget_safety_ratio: float = Field(default=0.95, gt=0, le=1)
+    budget_reserve_calls: int = Field(default=0, ge=0)
 
     # 수집
     status_period_min: int = Field(default=10, ge=1, le=10)
