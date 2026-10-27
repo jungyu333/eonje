@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from eonje.client.types import CallRecord
 from eonje.storage.db import session_scope
 from eonje.storage.models import ApiCallLog
-from eonje.storage.raw import require_aware
+from eonje.timeutil import require_aware
 
 
 class CallLogWriter:

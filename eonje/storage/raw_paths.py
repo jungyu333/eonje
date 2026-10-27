@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from enum import StrEnum
 
+from eonje.timeutil import KST, require_aware
+
 # 한국은 서머타임이 없어 고정 오프셋으로 충분하다 (Windows에서 tzdata 없이 동작)
-PARTITION_TZ = timezone(timedelta(hours=9), "KST")
+PARTITION_TZ = KST
 MAX_PAGE_NO = 999
 _RUN_KEY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_.-]*$")
 
@@ -28,8 +30,7 @@ class Dataset(StrEnum):
 
 def partition_date(collected_at: datetime) -> date:
     """수집 시각 → dt 파티션 날짜 (KST). 시간대 없는 시각은 거부한다."""
-    if collected_at.tzinfo is None or collected_at.utcoffset() is None:
-        raise ValueError(f"collected_at must be timezone-aware: {collected_at!r}")
+    require_aware("collected_at", collected_at)
     return collected_at.astimezone(PARTITION_TZ).date()
 
 
