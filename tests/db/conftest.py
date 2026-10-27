@@ -12,7 +12,18 @@ from eonje.config import DatabaseSettings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-pytestmark = pytest.mark.db
+DB_TESTS_DIR = Path(__file__).resolve().parent
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Every test under tests/db gets the db marker, so `-m 'not db'` always skips them.
+
+    tryfirst: the marker must be on the item before pytest's own -m deselection runs.
+    """
+    for item in items:
+        if item.path.is_relative_to(DB_TESTS_DIR):
+            item.add_marker(pytest.mark.db)
 
 
 @pytest.fixture(scope="session")
