@@ -10,6 +10,7 @@ dt는 수집 시각(collected_at)의 KST 날짜다. 같은 run이 두 날짜 파
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -21,6 +22,7 @@ from eonje.timeutil import KST, require_aware
 PARTITION_TZ = KST
 MAX_PAGE_NO = 999
 _RUN_KEY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z_.-]*$")
+_UNSAFE = re.compile(r"[^0-9A-Za-z_.-]")
 
 
 class Dataset(StrEnum):
@@ -59,3 +61,21 @@ def page_path(bucket: str, run: RawRun, page_no: int) -> str:
 
 def manifest_path(bucket: str, run: RawRun) -> str:
     return f"{run_prefix(bucket, run)}/_manifest.json"
+
+
+def run_key_from_run_id(run_id: str) -> str:
+
+    if not run_id:
+        raise ValueError("run_id must not be empty")
+
+    key = _UNSAFE.sub("-", run_id)
+
+    if not key[0].isalnum():
+        key = "r" + key
+
+    if key == run_id:
+        return key
+
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:8]
+
+    return f"{key}-{digest}"
