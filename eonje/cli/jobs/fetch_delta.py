@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from eonje.config import Settings
+from eonje.cli.context import JobContext
 
 
-def run(run_id: str, settings: Settings) -> int:
+def run(ctx: JobContext) -> int:
     raise NotImplementedError("fetch-delta is not implemented yet")
