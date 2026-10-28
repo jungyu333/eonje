@@ -507,7 +507,7 @@ def test_env_example_with_only_the_api_key_filled_loads(api_key_env: str, tmp_pa
     # THEN every example value validates, the quoted endpoint is unquoted,
     # and the unfilled S3 credentials count as unset
     assert settings.raw_bucket == "eonje-raw"
-    assert settings.s3_endpoint_url == "http://minio:9000"
+    assert settings.s3_endpoint_url == "http://seaweedfs:8333"
     assert settings.serve_zcodes == ["11"]
     assert settings.s3_access_key is None
     assert settings.s3_secret_key is None
