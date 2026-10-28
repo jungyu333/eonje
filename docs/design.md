@@ -318,7 +318,10 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 ```
 
 - **`dt`는 수집 시각(`collected_at`)의 KST 날짜**(`partition_date`). 기록기가 `run.dt`와 맞지 않으면 거부한다 → 같은 run이 두 날짜 파티션에 생기지 않는다
-- `run_key`는 경로에 안전한 문자만(`[0-9A-Za-z_.-]`). Airflow run_id에서 결정적으로 만든다 (#8)
+- `run_key`는 경로에 안전한 문자만(`[0-9A-Za-z_.-]`). Airflow run_id에서 결정적으로 만든다 (`run_key_from_run_id`)
+  - 이미 안전한 run_id는 그대로 쓴다. 문자를 `-`로 바꾸거나 앞에 `r`을 붙였다면 끝에 `-<원문 sha256 앞 8자>`를 붙인다
+  - 이유: 치환만 하면 서로 다른 run_id(`a:b`, `a/b`, `a-b`)가 같은 `run=` 폴더가 되어, 한 run이 다른 run의 원본을 덮어쓴다
+  - 예: `scheduled__2026-10-26T01:10:00+00:00` → `scheduled__2026-10-26T01-10-00-00-00-<hash8>`
 - 컬럼: 응답 item의 필드 전부를 **string**으로 받은 그대로(미지 필드 유지, 문자열이 아닌 JSON 값은 JSON 표기 그대로) + 메타 `collected_at`(timestamp UTC), `page_fetched_at`(timestamp UTC), `page_no`(int32). 타입 변환은 정제 단계에서
 - 스키마는 페이지에 나온 필드로 정해져 페이지·run마다 컬럼 구성이 다를 수 있다. Spark는 `mergeSchema`로 읽는다 (전부 string이라 타입 충돌 없음)
 - 시각은 모두 시간대가 있어야 하고 UTC로 저장한다. 시간대 없는 시각은 거부
