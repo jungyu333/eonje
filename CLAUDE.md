@@ -62,7 +62,7 @@ docs/         # design.md, requirements.md
 ## Spark Rules
 
 - Collection is plain Python; every transform/aggregate after it runs on Spark (single engine, standalone, client mode).
-- Read/write only via `s3a://` (MinIO) and JDBC — never local paths (executors on other nodes cannot see them).
+- Read/write only via `s3a://` (SeaweedFS S3) and JDBC — never local paths (executors on other nodes cannot see them).
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
 - jars and packages are baked into the `eonje-spark` image; never fetched at runtime.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
@@ -74,7 +74,7 @@ docs/         # design.md, requirements.md
   Same entrypoint everywhere: `python -m eonje.cli <job> --run-id <id>`. Airflow's image never contains eonje or Spark.
 - Images are pushed to GHCR tagged with the git sha. **No code on servers**: a node holds only `compose.yaml`, `.env`,
   and volumes. DAGs reach Airflow via GitDagBundle tracking the `deploy` ref, which CD moves after images are pushed.
-- Node A (always on): Airflow, Postgres, MinIO, collector, API, cloudflared, Spark master (+worker until B).
+- Node A (always on): Airflow, Postgres, SeaweedFS (S3), collector, API, cloudflared, Spark master (+worker until B).
   Node B (added on measured need): Spark worker, monitoring, local backup, model training. Stateful services stay on A.
 - No inbound ports: public traffic via Cloudflare Tunnel, admin access via Tailscale.
 - Details: `docs/design.md` sections 2.3, 2.5, 8.
