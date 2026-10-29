@@ -45,7 +45,8 @@ EONJE_S3_ACCESS_KEY=<임의 값>
 EONJE_S3_SECRET_KEY=<임의 값>
 ```
 
-S3 키는 SeaweedFS가 이 값으로 계정을 만들므로 아무 값이나 정하면 된다.
+S3 키는 SeaweedFS가 이 값으로 계정을 만들므로 아무 값이나 정하면 된다. 비어 있으면 빈 키로 열린 저장소가
+뜨지 않도록 compose가 멈춘다. 그래서 `make up SERVICES=postgres`처럼 S3를 안 쓰는 명령도 키를 먼저 채워야 한다.
 
 **2. 인프라와 스키마**
 
@@ -58,12 +59,14 @@ make buckets   # 원본 버킷 생성 (이미 있으면 그대로 성공)
 **3. 수집 1회**
 
 ```bash
-make run JOB=fetch-delta RUN_ID=manual__1 RUN_AFTER=2026-10-29T13:00:00+00:00
+# RUN_AFTER는 지금 시각(UTC). PowerShell: (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss+00:00")
+make run JOB=fetch-delta RUN_ID=manual__1 RUN_AFTER=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
 ```
 
 - `RUN_AFTER`는 Airflow의 `run_after` 자리다. 수집 시각과 날짜 파티션(KST)이 이 값으로 정해진다
-- 같은 `RUN_ID`·`RUN_AFTER`로 다시 돌리면 같은 위치를 덮어쓴다
-- 종료 코드: `0` 성공, `99` 오늘 예산 소진으로 건너뜀, `1` 실패, `2` 사용법·설정 오류
+- API는 지금부터 최근 10분만 주므로, `RUN_AFTER`가 지금과 10분(`EONJE_FETCH_MAX_LAG_MIN`) 넘게 차이 나면 받지 않는다
+- 완료된 run은 다시 받지 않는다. 같은 `RUN_ID`로 다시 돌리면 호출 없이 끝나므로, 다시 수집하려면 새 `RUN_ID`를 쓴다
+- 종료 코드: `0` 수집 완료 또는 이미 완료된 run, `99` 건너뜀(예산 소진, 늦은 `RUN_AFTER`), `1` 실패, `2` 사용법·설정 오류
 
 **4. 결과 확인**
 

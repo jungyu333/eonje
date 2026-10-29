@@ -71,7 +71,7 @@ flowchart LR
   | `eonje-ml` | `docker/tasks/ml/` | eonje + LightGBM 등 | 학습·배치 추론 (9단계) |
   | `eonje-api` | `docker/api/` | eonje + FastAPI | 조회 API |
 
-- 태스크는 `@task.docker(image="ghcr.io/jungyu333/eonje-<runtime>:<sha>", command=["python", "-m", "eonje.cli", "<job>", "--run-id", ...])`. 진입점은 모든 태스크 이미지에서 같다
+- 태스크는 `@task.docker(image="ghcr.io/jungyu333/eonje-<runtime>:<sha>", command=["python", "-m", "eonje.cli", "<job>", "--run-id", <run_id>, "--run-after", <dag_run.run_after>])`. 진입점은 모든 태스크 이미지에서 같다. `--run-after`(ISO 8601, 오프셋 필수)가 수집 시각과 날짜 파티션을 정하므로 둘 다 필수다
 - 태스크 간 데이터는 XCom이 아니라 SeaweedFS·DB를 거친다. XCom은 run_id·건수·페이지 상한 같은 작은 값만
 - 네트워크: 수집 태스크는 compose 네트워크에 붙어 Postgres·SeaweedFS에 접근. Spark 드라이버 태스크는 `network_mode: host` (다른 노드의 executor가 드라이버에 접속해야 함, 8.2)
 - 원격 실행: 모델 학습 등 Spark가 아닌 무거운 태스크는 `@task.docker(docker_url=<B>)`로 B 노드의 Docker에서 실행 (8.1)
@@ -83,14 +83,15 @@ flowchart LR
 ```
 eonje/
   eonje/                  # 순수 Python 패키지. Airflow를 import하지 않는다
-    cli/                  # 태스크 진입점: `python -m eonje.cli <job> --run-id ...`
+    cli/                  # 태스크 진입점: `python -m eonje.cli <job> --run-id ... --run-after ...`
       __main__.py         # app.main 위임만
       app.py              # 인자 파싱, 설정 로드, job 디스패치, 종료 코드
       registry.py         # job 이름 → 함수 매핑
-      jobs/               # job 하나 = 모듈 하나 = DAG 태스크 하나. client·storage·transform 배선만, 로직 없음
+      jobs/               # job 하나 = 모듈 하나 = DAG 태스크 하나. 의존성 생성과 결과 → 종료 코드 변환만, 로직 없음
     config.py             # 설정값 (한도·간격·지역·페이지 크기·Spark master 등). EONJE_ 환경변수·.env에서 로드
     client/               # API 클라이언트: 요청 조립, 페이지네이션, 재시도, 응답 검증
     budget/               # 호출 예산: 오늘 사용량 조회, 실행 가능 여부·페이지 상한 판단
+    collect/              # 수집 흐름: 완료·지연 확인 → 예산 판단 → 페이지 순회 → 원본 run 쓰기. client·budget·storage를 조합하고, HTTP·파일시스템·DB 세션은 주입받는다
     storage/
       raw.py              # 원본 Parquet 경로 규칙, 쓰기(수집) — pyarrow + s3fs
       spark.py            # SparkSession 생성(설정 주입), s3a 읽기, JDBC 스테이징 쓰기
@@ -334,7 +335,11 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - 페이지는 메모리 버퍼에 Parquet(zstd)으로 다 쓴 뒤 한 번에 올린다 → 실패하면 객체가 생기지 않는다
 - run은 `start → write × N → finish`. `start`는 **manifest를 먼저 지우고** run 폴더를 비운다(재실행 때 지난 페이지가 남지 않음). `finish`는 모든 페이지를 쓴 뒤 **`_manifest.json`을 마지막에** 쓴다
 - **manifest가 있는 run만 완료된 run이다.** 읽는 쪽(Spark 워터마크)은 manifest가 없는 run을 건너뛴다. 중간 실패·정리 실패 모두 manifest가 없는 상태로 남는다
-- manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않아 같은 run이면 내용이 같다. `row_count < total_count`면 예산 상한으로 잘린 run
+- manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, page_size, expected_pages, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않는다. 받은 페이지 < `expected_pages`면 예산 상한으로 잘린 run, 페이지를 다 받았는데 `row_count ≠ total_count`면 페이징 드리프트 (5장)
+- **완료된 run은 다시 받지 않는다** (2026.10.29). API는 '지금부터 최근 N분'만 주므로, 같은 run을 나중에 받으면 다른 데이터에 예전 `collected_at`이 붙고 `start`가 원래 원본을 지운다. 원본은 다시 받을 수 없다
+  - manifest가 있으면 호출 없이 성공 (종료 코드 0)
+  - `run_after`가 지금과 `EONJE_FETCH_MAX_LAG_MIN`(기본 10분)보다 멀면 호출 없이 건너뜀 (99). 밀린 run, catchup
+  - manifest가 없는 run(중간 실패)만 run 폴더를 비우고 다시 받는다. 다시 수집하고 싶으면 새 run_id
 - 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 
 ### 서빙·정제 (Postgres `eonje` DB, `storage/models.py`)
@@ -359,7 +364,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 ## 7. DAG 구성
 
-Airflow 3, LocalExecutor, TaskFlow `@task.docker`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
+Airflow 3, LocalExecutor, TaskFlow `@task.docker`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id> --run-after <dag_run.run_after>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
 
 Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나만 돈다. 변환은 **워터마크** 방식이다: 자기 run의 원본만이 아니라 아직 처리하지 않은 원본 run을 전부 처리한다. 그래서 변환이 멈췄다 살아나면 자동으로 따라잡고, 수집은 변환 상태와 무관하게 계속된다.
 
@@ -371,7 +376,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 5. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 ### `ev_status_10min` (10분)
-1. `fetch_delta` (C) — 예산 판단 후 `period=10` 전 페이지, 원본 저장. 예산이 없으면 호출 없이 종료 코드 99 → `skip_on_exit_code=99`로 이 태스크와 이후 태스크가 skipped
+1. `fetch_delta` (C) — 예산 판단 후 `period=10` 전 페이지, 원본 저장. 예산이 없거나 run이 늦었으면 호출 없이 종료 코드 99 → `skip_on_exit_code=99`로 skipped. 이미 완료된 run은 호출 없이 0 (6장)
 2. `dedupe_load_obs` (S) — 중복 제거 후 `obs_status` 적재 (`source=delta`)
 3. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
 4. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
@@ -389,7 +394,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - `ml_train_weekly` — 피처 생성(S) → 학습(`eonje-ml`, `docker_url`=B) → 모델 파일 SeaweedFS 저장, 운영 버전 Postgres 기록
 - `ml_infer_hourly` — 운영 버전 모델로 배치 추론 → 예측 테이블
 
-재실행 규칙: 원본은 `run=<ts>` 디렉터리 덮어쓰기. `obs_status`는 키 충돌 시 무시. 전이·세션은 upsert. 집계는 구간 단위 삭제 후 재계산. 백필은 Airflow 없이 `eonje.cli`를 직접 호출해도 같은 결과.
+재실행 규칙: 원본은 완료된 run을 다시 받지 않고, 중간 실패한 run만 run 폴더를 비우고 다시 받는다 (6장). `obs_status`는 키 충돌 시 무시. 전이·세션은 upsert. 집계는 구간 단위 삭제 후 재계산. 변환·집계의 백필은 Airflow 없이 `eonje.cli`를 직접 호출해도 같은 결과. 수집은 지난 구간을 받을 수 없어 백필이 없다.
 
 ## 8. 인프라·운영
 
@@ -528,7 +533,6 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - B 추가 후 A의 Spark worker 유지(2워커) 여부
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
 - `ev_status_10min`의 Spark 태스크를 한 앱으로 묶을지 (소요 시간 측정 후)
-- 원본 run을 재수집하면 이미 변환된 run의 내용이 바뀔 수 있다. 워터마크는 run_key만이 아니라 manifest 기준(collected_at, 내용 해시 등)으로 잡을지 — 4단계 변환 설계 때
 
 ## 13. 코드표 (설계에 쓰는 것만)
 
