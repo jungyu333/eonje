@@ -615,3 +615,21 @@ def test_read_manifest_rejects_an_unknown_version(
     # WHEN / THEN reading it fails with a clear version error, not a TypeError
     with pytest.raises(ValueError, match="unsupported manifest version"):
         read_manifest(mem_fs, BUCKET, run)
+
+
+def test_read_manifest_rejects_a_manifest_missing_fields(
+    mem_fs: MemoryFileSystem, run: RawRun, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN a finished run whose manifest predates page_size / expected_pages (same version)
+    writer = _started(mem_fs, run)
+    writer.write(_page(status_items))
+    writer.finish()
+    data = json.loads(mem_fs.cat_file(manifest_path(BUCKET, run)))
+    del data["page_size"], data["expected_pages"]
+    mem_fs.pipe_file(manifest_path(BUCKET, run), json.dumps(data).encode("utf-8"))
+
+    # WHEN / THEN reading it fails with a ValueError naming the fields, not a KeyError
+    with pytest.raises(ValueError, match="missing fields") as exc:
+        read_manifest(mem_fs, BUCKET, run)
+    assert "page_size" in str(exc.value)
+    assert "expected_pages" in str(exc.value)

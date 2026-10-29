@@ -134,11 +134,16 @@ class RawRunWriter:
 
 
 def read_manifest(fs: AbstractFileSystem, bucket: str, run: RawRun) -> RunManifest | None:
-    """완료된 run이면 manifest, 아니면 None. 모르는 버전이면 ValueError."""
+    """완료된 run이면 manifest, 아니면 None. 모르는 버전이거나 필드가 빠졌으면 ValueError."""
     path = manifest_path(bucket, run)
     if not fs.exists(path):
         return None
     data = json.loads(fs.cat_file(path))
     if data.get("version") != MANIFEST_VERSION:
         raise ValueError(f"unsupported manifest version: {data.get('version')!r} at {path}")
+    missing = [f.name for f in fields(RunManifest) if f.name not in data]
+    if missing:
+        # version 1은 배포 전이라 필드를 늘려도 버전을 올리지 않았다.
+        # 그 전에 쓴 로컬 manifest가 여기 걸린다
+        raise ValueError(f"manifest at {path} is missing fields {missing}")
     return RunManifest(**{f.name: data[f.name] for f in fields(RunManifest)})
