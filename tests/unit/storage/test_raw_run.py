@@ -16,6 +16,7 @@ from eonje.storage.raw_run import MANIFEST_VERSION, RawRunWriter, RunManifest, r
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "evcharger"
 BUCKET = "eonje-raw"
+PAGE_SIZE = 10
 KST = timezone(timedelta(hours=9))
 COLLECTED_AT = datetime(2026, 10, 26, 10, 10, 0, tzinfo=UTC)
 FETCHED_AT = datetime(2026, 10, 26, 10, 10, 3, 250000, tzinfo=UTC)
@@ -49,7 +50,7 @@ def status_items() -> list[dict[str, Any]]:
 def _started(
     fs: MemoryFileSystem, run: RawRun, collected_at: datetime = COLLECTED_AT
 ) -> RawRunWriter:
-    writer = RawRunWriter(fs, BUCKET, run, collected_at)
+    writer = RawRunWriter(fs, BUCKET, run, collected_at, page_size=PAGE_SIZE)
     writer.start()
     return writer
 
@@ -71,7 +72,7 @@ def test_writer_rejects_a_naive_collected_at(mem_fs: MemoryFileSystem, run: RawR
     # WHEN a writer is created
     # THEN it raises before anything is touched
     with pytest.raises(ValueError, match="collected_at"):
-        RawRunWriter(mem_fs, BUCKET, run, naive)
+        RawRunWriter(mem_fs, BUCKET, run, naive, page_size=PAGE_SIZE)
     assert mem_fs.find(f"{BUCKET}/") == []
 
 
@@ -80,7 +81,7 @@ def test_writer_rejects_a_naive_collected_at(mem_fs: MemoryFileSystem, run: RawR
 
 def test_start_on_a_fresh_run_leaves_the_store_empty(mem_fs: MemoryFileSystem, run: RawRun) -> None:
     # GIVEN no prior objects for the run
-    writer = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT)
+    writer = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT, page_size=PAGE_SIZE)
     # WHEN the writer is started
     writer.start()
     # THEN nothing is created
@@ -143,7 +144,7 @@ def test_writer_rejects_a_run_dt_that_is_not_the_kst_date_of_collected_at(
 
     # WHEN / THEN the writer refuses, so one run cannot land in two date partitions
     with pytest.raises(ValueError, match="KST date"):
-        RawRunWriter(mem_fs, BUCKET, run, collected_at)
+        RawRunWriter(mem_fs, BUCKET, run, collected_at, page_size=PAGE_SIZE)
 
 
 def test_start_after_a_failed_cleanup_leaves_the_run_incomplete(
@@ -165,7 +166,7 @@ def test_start_after_a_failed_cleanup_leaves_the_run_incomplete(
     monkeypatch.setattr(mem_fs, "rm", failing_rm)
 
     # WHEN the run is retried
-    retry = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT)
+    retry = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT, page_size=PAGE_SIZE)
     with pytest.raises(OSError):
         retry.start()
 
@@ -181,7 +182,7 @@ def test_write_before_start_raises_and_writes_nothing(
     mem_fs: MemoryFileSystem, run: RawRun, status_items: list[dict[str, Any]]
 ) -> None:
     # GIVEN a writer that was not started
-    writer = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT)
+    writer = RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT, page_size=PAGE_SIZE)
     # WHEN a page is written
     # THEN it raises and the store is empty
     with pytest.raises(RuntimeError, match="start"):
@@ -331,6 +332,8 @@ def test_finish_returns_a_manifest_describing_the_run(
         collected_at="2026-10-26T10:10:00+00:00",
         total_count=25,
         row_count=len(status_items) + 3,
+        page_size=PAGE_SIZE,
+        expected_pages=3,
         pages=[1, 2],
     )
 
@@ -343,9 +346,63 @@ def test_finish_reports_fewer_rows_than_total_when_the_budget_cut_the_run(
     writer.write(_page(status_items, page_no=1, total_count=5000))
     # WHEN the run is finished
     manifest = writer.finish()
-    # THEN row_count is below total_count
+    # THEN row_count is below total_count and the run is marked truncated, with no drift verdict
     assert manifest.total_count == 5000
     assert manifest.row_count == len(status_items)
+    assert manifest.expected_pages == 500
+    assert manifest.truncated
+    assert manifest.drift is None
+
+
+@pytest.mark.parametrize(
+    ("total_count", "page2_rows", "expected_drift"),
+    [
+        (13, 3, 0),  # every row arrived
+        (13, 2, 1),  # window shrank between pages -> a row may have been skipped
+        (11, 3, -2),  # window grew between pages -> rows may be duplicated
+    ],
+)
+def test_finish_reports_drift_when_all_pages_arrived_but_rows_differ_from_total(
+    mem_fs: MemoryFileSystem,
+    run: RawRun,
+    status_items: list[dict[str, Any]],
+    total_count: int,
+    page2_rows: int,
+    expected_drift: int,
+) -> None:
+    # GIVEN both expected pages written, page 1 full
+    full = status_items[:PAGE_SIZE]
+    assert len(full) == PAGE_SIZE
+    writer = _started(mem_fs, run)
+    writer.write(_page(full, page_no=1, total_count=total_count))
+    writer.write(_page(status_items[:page2_rows], page_no=2, total_count=total_count))
+    # WHEN the run is finished
+    manifest = writer.finish()
+    # THEN it is not truncated and drift is total_count - row_count
+    assert manifest.expected_pages == 2
+    assert not manifest.truncated
+    assert manifest.drift == expected_drift
+
+
+def test_empty_result_expects_one_page_and_has_no_drift(
+    mem_fs: MemoryFileSystem, run: RawRun
+) -> None:
+    # GIVEN a run whose only page is empty with totalCount 0
+    writer = _started(mem_fs, run)
+    writer.write(_page([], total_count=0))
+    # WHEN the run is finished
+    manifest = writer.finish()
+    # THEN one page was expected and received
+    assert manifest.expected_pages == 1
+    assert not manifest.truncated
+    assert manifest.drift == 0
+
+
+def test_writer_rejects_a_non_positive_page_size(mem_fs: MemoryFileSystem, run: RawRun) -> None:
+    # WHEN / THEN a page size below 1 is refused before anything is touched
+    with pytest.raises(ValueError, match="page_size"):
+        RawRunWriter(mem_fs, BUCKET, run, COLLECTED_AT, page_size=0)
+    assert mem_fs.find(f"{BUCKET}/") == []
 
 
 def test_finish_lists_pages_sorted_regardless_of_write_order(

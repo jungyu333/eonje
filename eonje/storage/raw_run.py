@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 
 from fsspec import AbstractFileSystem
 
+from eonje.client.paging import page_count
 from eonje.client.types import Page
 from eonje.storage.raw import write_page
 from eonje.storage.raw_paths import RawRun, manifest_path, partition_date, run_prefix
@@ -31,15 +32,40 @@ class RunManifest:
     run_key: str
     collected_at: str  # ISO 8601, UTC
     total_count: int  # 1페이지의 totalCount
-    row_count: int  # 실제로 쓴 행 수. 예산 상한으로 잘리면 total_count보다 작다
+    row_count: int  # 실제로 쓴 행 수
+    page_size: int  # 요청한 numOfRows
+    expected_pages: int  # total_count를 다 받는 데 필요한 페이지 수
     pages: list[int]  # 쓴 페이지 번호 (정렬)
+
+    @property
+    def truncated(self) -> bool:
+        """예상한 페이지를 다 받지 못했다 (예산 상한으로 잘림)."""
+        return len(self.pages) < self.expected_pages
+
+    @property
+    def drift(self) -> int | None:
+        """페이지를 다 받았을 때 total_count - row_count. 잘린 run은 비교할 수 없어 None.
+
+        페이징 도중 원본(최근 N분 창)이 바뀌면 0이 아니다. 양수면 누락, 음수면 중복 가능성.
+        """
+        if self.truncated:
+            return None
+        return self.total_count - self.row_count
 
 
 class RawRunWriter:
     def __init__(
-        self, fs: AbstractFileSystem, bucket: str, run: RawRun, collected_at: datetime
+        self,
+        fs: AbstractFileSystem,
+        bucket: str,
+        run: RawRun,
+        collected_at: datetime,
+        *,
+        page_size: int,
     ) -> None:
         require_aware("collected_at", collected_at)
+        if page_size < 1:
+            raise ValueError(f"page_size must be >= 1, got {page_size}")
         expected_dt = partition_date(collected_at)
         if run.dt != expected_dt:
             raise ValueError(
@@ -49,6 +75,7 @@ class RawRunWriter:
         self._bucket = bucket
         self._run = run
         self._collected_at = collected_at
+        self._page_size = page_size
         self._started = False
         self._operation: str | None = None
         self._total_count = 0
@@ -97,6 +124,8 @@ class RawRunWriter:
             collected_at=self._collected_at.astimezone(UTC).isoformat(),
             total_count=self._total_count,
             row_count=self._row_count,
+            page_size=self._page_size,
+            expected_pages=page_count(self._total_count, self._page_size),
             pages=sorted(self._pages),
         )
         body = json.dumps(asdict(manifest), ensure_ascii=False, indent=2, sort_keys=True)
