@@ -66,7 +66,7 @@ flowchart LR
 
   | 이미지 | Dockerfile | 내용 | 쓰는 곳 |
   |---|---|---|---|
-  | `eonje-collector` | `docker/tasks/collector/` | python:3.11-slim + uv + eonje (httpx, pyarrow, s3fs) | `check_budget`, `fetch_*` |
+  | `eonje-collector` | `docker/tasks/collector/` | python:3.11-slim + uv + eonje (httpx, pyarrow, s3fs) | `fetch_*` |
   | `eonje-spark` | `docker/tasks/spark/` | Spark + PySpark + eonje + s3a·JDBC jar | Spark 드라이버(태스크), master, worker 공용 — 명령만 다름. Spark·Python 버전이 자동으로 일치 |
   | `eonje-ml` | `docker/tasks/ml/` | eonje + LightGBM 등 | 학습·배치 추론 (9단계) |
   | `eonje-api` | `docker/api/` | eonje + FastAPI | 조회 API |
@@ -371,13 +371,14 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 5. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 ### `ev_status_10min` (10분)
-1. `check_budget` (C) — 오늘 사용량 조회, 실행 여부·페이지 상한 결정 (XCom으로 상한 전달)
-2. `fetch_delta` (C) — `period=10` 전 페이지, 원본 저장
-3. `dedupe_load_obs` (S) — 중복 제거 후 `obs_status` 적재 (`source=delta`)
-4. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
-5. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
+1. `fetch_delta` (C) — 예산 판단 후 `period=10` 전 페이지, 원본 저장. 예산이 없으면 호출 없이 종료 코드 99 → `skip_on_exit_code=99`로 이 태스크와 이후 태스크가 skipped
+2. `dedupe_load_obs` (S) — 중복 제거 후 `obs_status` 적재 (`source=delta`)
+3. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
+4. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
 
-3~5는 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을 수 있다. 묶을지는 소요 시간을 재 보고 정한다.
+예산 판단을 별도 태스크(`check_budget` → XCom으로 상한 전달)로 두지 않는다 (2026.10.29). 판단과 호출 사이에 다른 잡이 호출하면 넘겨받은 상한이 낡기 때문에, 호출하는 잡이 시작할 때 직접 판단한다. 남은 예산은 `fetch_delta` 로그와 `api_call_log`로 본다.
+
+2~4는 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을 수 있다. 묶을지는 소요 시간을 재 보고 정한다.
 
 ### `ev_aggregate_hourly` (매시)
 1. `agg_occupancy` (S) — 지난 구간의 관측·세션에서 증분 집계
@@ -502,7 +503,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 | 단계 | 내용 | 엔진 | 노드 |
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
-| 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `check_budget`·`fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
+| 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
 | 3 | `ev_master_daily` + 차원 테이블과 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환). 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
