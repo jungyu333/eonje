@@ -32,8 +32,11 @@ def test_known_job_returns_not_implemented(
     api_key_env: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # GIVEN valid settings and a stub job that is not implemented yet
+    # (only valid while some job is still a stub; fetch-master lands in stage 3)
     # WHEN the job is run
-    code = main(_argv(run_id="manual__2026-10-13"))
+    argv = _argv(run_id="manual__2026-10-13")
+    argv[0] = "fetch-master"
+    code = main(argv)
 
     # THEN the CLI exits 2 with the job's not-implemented message
     assert code == 2
