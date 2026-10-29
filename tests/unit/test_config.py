@@ -370,7 +370,7 @@ def test_storage_defaults_apply_when_only_the_key_is_set(api_key_env: str) -> No
 
     # THEN storage fields take their documented local-dev defaults
     assert settings.raw_bucket == "eonje-raw"
-    assert settings.s3_endpoint_url == "http://localhost:9000"
+    assert settings.s3_endpoint_url == "http://127.0.0.1:8333"
     assert settings.s3_access_key is None
     assert settings.s3_secret_key is None
     assert (
@@ -384,7 +384,7 @@ def test_storage_values_are_read_from_prefixed_env_vars(
 ) -> None:
     # GIVEN storage overrides under the EONJE_ prefix
     monkeypatch.setenv("EONJE_RAW_BUCKET", "eonje-raw-test")
-    monkeypatch.setenv("EONJE_S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("EONJE_S3_ENDPOINT_URL", "http://seaweedfs:8333")
     monkeypatch.setenv("EONJE_S3_ACCESS_KEY", "access-id")
     monkeypatch.setenv("EONJE_S3_SECRET_KEY", "secret-value")
 
@@ -393,7 +393,7 @@ def test_storage_values_are_read_from_prefixed_env_vars(
 
     # THEN the overrides are applied, with credentials wrapped as secrets
     assert settings.raw_bucket == "eonje-raw-test"
-    assert settings.s3_endpoint_url == "http://minio:9000"
+    assert settings.s3_endpoint_url == "http://seaweedfs:8333"
     assert settings.s3_access_key is not None
     assert settings.s3_access_key.get_secret_value() == "access-id"
     assert settings.s3_secret_key is not None

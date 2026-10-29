@@ -33,7 +33,8 @@ class Settings(DatabaseSettings):
     # 저장
     # S3 버킷 이름 규칙. 스킴(s3://, s3a://)은 쓰는 쪽이 붙인다
     raw_bucket: str = Field(default="eonje-raw", pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-    s3_endpoint_url: str = "http://localhost:9000"  # MinIO. 컨테이너 안에서는 http://minio:9000
+    # SeaweedFS S3. 컨테이너 안에서는 http://seaweedfs:8333
+    s3_endpoint_url: str = "http://127.0.0.1:8333"
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
 

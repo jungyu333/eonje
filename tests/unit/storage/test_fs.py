@@ -7,7 +7,7 @@ from eonje.storage.fs import raw_filesystem
 
 ACCESS_KEY = "test-access-key"
 SECRET_KEY = "test-secret-key"
-ENDPOINT = "http://minio.test:9000"
+ENDPOINT = "http://seaweedfs.test:8333"
 
 
 def _settings(access_key: str | None = ACCESS_KEY, secret_key: str | None = SECRET_KEY) -> Settings:
@@ -32,7 +32,7 @@ def test_credentials_are_passed_as_plain_strings(captured: dict[str, Any]) -> No
 
 
 def test_endpoint_comes_from_settings(captured: dict[str, Any]) -> None:
-    # GIVEN settings pointing at a MinIO endpoint
+    # GIVEN settings pointing at an S3 endpoint
     settings = _settings()
 
     # WHEN the filesystem is built
@@ -47,7 +47,7 @@ def test_path_style_addressing_is_used(captured: dict[str, Any]) -> None:
     # WHEN the filesystem is built
     raw_filesystem(_settings())
 
-    # THEN path-style addressing is requested (MinIO has no virtual-host buckets)
+    # THEN path-style addressing is requested (SeaweedFS serves buckets by path, not virtual host)
     assert captured["config_kwargs"] == {"s3": {"addressing_style": "path"}}
 
 
