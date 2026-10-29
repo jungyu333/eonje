@@ -63,6 +63,26 @@ def test_run_id_is_required() -> None:
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("run_id", ["", "   "])
+def test_blank_run_id_is_a_usage_error_and_the_job_never_runs(
+    api_key_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    run_id: str,
+) -> None:
+    # GIVEN a job that must not run
+    calls = _record_contexts(monkeypatch)
+
+    # WHEN the CLI is invoked with an empty or blank --run-id
+    with pytest.raises(SystemExit) as exc:
+        main(_argv(run_id=run_id))
+
+    # THEN argparse rejects it with exit code 2 (not a traceback and exit 1)
+    assert exc.value.code == 2
+    assert "--run-id must not be empty or blank" in capsys.readouterr().err
+    assert calls == []
+
+
 def test_run_after_is_required(api_key_env: str, monkeypatch: pytest.MonkeyPatch) -> None:
     # GIVEN arguments without --run-after and a job that must not run
     calls = _record_contexts(monkeypatch)
