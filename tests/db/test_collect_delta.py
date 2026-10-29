@@ -1,7 +1,7 @@
-"""DB tests for eonje.cli.jobs.fetch_delta: budget -> paged fetch -> raw run + api_call_log.
+"""DB tests for eonje.collect.delta: budget -> paged fetch -> raw run + api_call_log.
 
 HTTP is mocked at the transport level, the raw store is an in-memory fsspec filesystem,
-and api_call_log is real Postgres (rolled back per test). The job's wall-clock "now"
+and api_call_log is real Postgres (rolled back per test). The flow's wall-clock "now"
 (used only for the quota day) is frozen.
 """
 
@@ -20,11 +20,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from tenacity import wait_none
 
-from eonje.cli import exit_codes
-from eonje.cli.context import JobContext
-from eonje.cli.jobs import fetch_delta as job
 from eonje.client.errors import ApiError
 from eonje.client.types import CallRecord
+from eonje.collect.delta import Outcome, collect_delta
 from eonje.config import Settings
 from eonje.storage.call_log import CallLogWriter
 from eonje.storage.models import ApiCallLog
@@ -92,12 +90,20 @@ def _run(
     *,
     settings: Settings | None = None,
     run_after: datetime = RUN_AFTER,
-) -> int:
-    ctx = JobContext(run_id=RUN_ID, run_after=run_after, settings=settings or _settings())
+) -> Outcome:
     with httpx.Client(transport=httpx.MockTransport(api)) as http:
-        return job.fetch_delta(
-            ctx, http=http, fs=fs, factory=factory, wait=wait_none(), now=lambda: NOW
+        result = collect_delta(
+            settings or _settings(),
+            job="fetch-delta",
+            run_id=RUN_ID,
+            run_after=run_after,
+            http=http,
+            fs=fs,
+            factory=factory,
+            wait=wait_none(),
+            now=lambda: NOW,
         )
+    return result.outcome
 
 
 def _log_rows(factory: sessionmaker[Session]) -> list[ApiCallLog]:
@@ -135,17 +141,17 @@ def _seed_calls(factory: sessionmaker[Session], *called_at: datetime) -> None:
 # --- normal run ---------------------------------------------------------------
 
 
-def test_normal_run_exits_ok_and_writes_both_pages_and_the_manifest(
+def test_normal_run_is_collected_and_writes_both_pages_and_the_manifest(
     mem_fs: MemoryFileSystem, session_factory: sessionmaker[Session]
 ) -> None:
     # GIVEN an API whose totalCount needs 2 pages at page_size=9999 and plenty of budget
     api = FakeApi()
 
-    # WHEN the job runs
-    code = _run(api, mem_fs, session_factory)
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory)
 
-    # THEN it exits OK after requesting pages 1 and 2
-    assert code == exit_codes.OK
+    # THEN it is collected after requesting pages 1 and 2
+    assert outcome is Outcome.COLLECTED
     assert api.page_nos == ["1", "2"]
     # AND the run directory holds page=001, page=002 and the manifest
     assert _files(mem_fs) == [
@@ -167,7 +173,7 @@ def test_normal_run_logs_one_call_per_page_tagged_with_job_and_run_id(
     # GIVEN a 2-page API
     api = FakeApi()
 
-    # WHEN the job runs
+    # WHEN the flow runs
     _run(api, mem_fs, session_factory)
 
     # THEN api_call_log has 2 rows, one per page, carrying the job name and run_id
@@ -183,7 +189,7 @@ def test_parquet_collected_at_is_run_after_not_wall_clock(
     # GIVEN a run_after that differs from the (frozen) wall clock
     assert RUN_AFTER != NOW
 
-    # WHEN the job runs
+    # WHEN the flow runs
     _run(FakeApi(), mem_fs, session_factory)
 
     # THEN every row of every page has collected_at == run_after, and so does the manifest
@@ -199,7 +205,7 @@ def test_dt_partition_is_the_kst_date_of_run_after(
     # GIVEN run_after 2026-10-28T16:00Z, which is 2026-10-29 01:00 KST
     run_after = datetime(2026, 10, 28, 16, 0, tzinfo=UTC)
 
-    # WHEN the job runs
+    # WHEN the flow runs
     _run(FakeApi(), mem_fs, session_factory, run_after=run_after)
 
     # THEN everything lands under dt=2026-10-29 and nothing under the UTC date
@@ -219,11 +225,11 @@ def test_insufficient_budget_skips_without_any_request_file_or_log(
     api = FakeApi()
     settings = _settings(api_daily_limit=1)
 
-    # WHEN the job runs
-    code = _run(api, mem_fs, session_factory, settings=settings)
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory, settings=settings)
 
-    # THEN it exits SKIPPED, makes no HTTP request, writes no file and logs no call
-    assert code == exit_codes.SKIPPED
+    # THEN it is skipped for budget, makes no HTTP request, writes no file and logs no call
+    assert outcome is Outcome.SKIPPED_BUDGET
     assert api.requests == []
     assert _files(mem_fs) == []
     assert _log_rows(session_factory) == []
@@ -238,11 +244,11 @@ def test_budget_cap_of_one_page_truncates_the_run(
     api = FakeApi()
     settings = _settings(api_daily_limit=3, budget_safety_ratio=1.0)
 
-    # WHEN the job runs
-    code = _run(api, mem_fs, session_factory, settings=settings)
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory, settings=settings)
 
-    # THEN it exits OK having fetched only page 1, and the manifest shows a truncated run
-    assert code == exit_codes.OK
+    # THEN it is collected having fetched only page 1, and the manifest shows a truncated run
+    assert outcome is Outcome.COLLECTED
     assert api.page_nos == ["1"]
     manifest = _manifest(mem_fs)
     assert manifest["pages"] == [1]
@@ -262,11 +268,11 @@ def test_all_pages_with_fewer_rows_than_total_is_logged_as_drift_not_truncation(
     # GIVEN an API that returns 2 pages whose rows do not add up to totalCount
     api = FakeApi()
 
-    # WHEN the job runs with enough budget for both pages
-    code = _run(api, mem_fs, session_factory)
+    # WHEN the flow runs with enough budget for both pages
+    outcome = _run(api, mem_fs, session_factory)
 
-    # THEN it exits OK and warns about drift, not about the budget
-    assert code == exit_codes.OK
+    # THEN it is collected and warns about drift, not about the budget
+    assert outcome is Outcome.COLLECTED
     drift = FIXTURE_TOTAL - 2 * FIXTURE_ITEMS
     assert f"totalCount drifted during paging: {2 * FIXTURE_ITEMS} rows written" in caplog.text
     assert f"(drift {drift:+d})" in caplog.text
@@ -274,18 +280,18 @@ def test_all_pages_with_fewer_rows_than_total_is_logged_as_drift_not_truncation(
 
 
 @pytest.mark.parametrize(
-    ("already_used", "expected_code", "expected_pages"),
+    ("already_used", "expected_outcome", "expected_pages"),
     [
-        (0, exit_codes.OK, ["1", "2"]),  # 6 usable -> 2 pages
-        (3, exit_codes.OK, ["1"]),  # 3 usable -> 1 page
-        (4, exit_codes.SKIPPED, []),  # 2 usable -> 0 pages
+        (0, Outcome.COLLECTED, ["1", "2"]),  # 6 usable -> 2 pages
+        (3, Outcome.COLLECTED, ["1"]),  # 3 usable -> 1 page
+        (4, Outcome.SKIPPED_BUDGET, []),  # 2 usable -> 0 pages
     ],
 )
 def test_existing_calls_today_reduce_the_budget(
     mem_fs: MemoryFileSystem,
     session_factory: sessionmaker[Session],
     already_used: int,
-    expected_code: int,
+    expected_outcome: Outcome,
     expected_pages: list[str],
 ) -> None:
     # GIVEN a ceiling of 6 calls (3 attempts per page) and some calls already logged today
@@ -293,11 +299,11 @@ def test_existing_calls_today_reduce_the_budget(
     api = FakeApi()
     settings = _settings(api_daily_limit=6, budget_safety_ratio=1.0)
 
-    # WHEN the job runs
-    code = _run(api, mem_fs, session_factory, settings=settings)
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory, settings=settings)
 
     # THEN the remaining budget decides how many pages are fetched
-    assert code == expected_code
+    assert outcome is expected_outcome
     assert api.page_nos == expected_pages
 
 
@@ -316,11 +322,11 @@ def test_calls_outside_the_current_kst_quota_day_do_not_reduce_the_budget(
     api = FakeApi()
     settings = _settings(api_daily_limit=6, budget_safety_ratio=1.0)
 
-    # WHEN the job runs
-    code = _run(api, mem_fs, session_factory, settings=settings)
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory, settings=settings)
 
     # THEN the full budget is available: both pages are fetched
-    assert code == exit_codes.OK
+    assert outcome is Outcome.COLLECTED
     assert api.page_nos == ["1", "2"]
 
 
@@ -333,11 +339,11 @@ def test_transient_500_on_page_one_is_retried_and_every_attempt_is_logged(
     # GIVEN an API that answers 500 once for page 1, then normally
     api = FakeApi(scripted=[httpx.Response(500, text="server error")])
 
-    # WHEN the job runs
-    code = _run(api, mem_fs, session_factory)
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory)
 
     # THEN the run completes normally
-    assert code == exit_codes.OK
+    assert outcome is Outcome.COLLECTED
     assert _manifest(mem_fs)["pages"] == [1, 2]
     # AND 3 calls are logged: page 1 twice (500, 200) and page 2 once
     rows = _log_rows(session_factory)
@@ -354,7 +360,7 @@ def test_api_gateway_error_raises_leaves_no_manifest_and_keeps_the_call_log(
     # GIVEN an API that answers the gateway "service key not registered" error
     api = FakeApi(scripted=[httpx.Response(200, text=GATEWAY_ERROR)])
 
-    # WHEN the job runs THEN ApiError propagates, without a retry
+    # WHEN the flow runs THEN ApiError propagates, without a retry
     with pytest.raises(ApiError) as exc_info:
         _run(api, mem_fs, session_factory)
     assert exc_info.value.result_code == "30"
@@ -381,10 +387,10 @@ def test_rerunning_the_same_run_rewrites_the_same_files_and_manifest(
     first_manifest = mem_fs.cat_file(MANIFEST)
 
     # WHEN the same run_id / run_after runs again
-    code = _run(FakeApi(), mem_fs, session_factory)
+    outcome = _run(FakeApi(), mem_fs, session_factory)
 
     # THEN the same paths exist with a byte-identical manifest
-    assert code == exit_codes.OK
+    assert outcome is Outcome.COLLECTED
     assert _files(mem_fs) == first_files
     assert mem_fs.cat_file(MANIFEST) == first_manifest
     # AND the call log grows by the calls actually made (2 + 2), all under the same run_id
