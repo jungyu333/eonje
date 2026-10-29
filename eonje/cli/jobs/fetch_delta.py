@@ -32,6 +32,9 @@ def run(ctx: JobContext) -> int:
 
 
 def exit_code(result: DeltaResult) -> int:
-    if result.outcome is Outcome.SKIPPED_BUDGET:
-        return exit_codes.SKIPPED
-    return exit_codes.OK
+    """이미 완료된 run은 성공(이후 태스크 진행), 받지 않은 run은 skipped."""
+    match result.outcome:
+        case Outcome.COLLECTED | Outcome.ALREADY_COMPLETE:
+            return exit_codes.OK
+        case Outcome.SKIPPED_STALE | Outcome.SKIPPED_BUDGET:
+            return exit_codes.SKIPPED

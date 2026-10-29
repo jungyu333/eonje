@@ -378,22 +378,86 @@ def test_api_gateway_error_raises_leaves_no_manifest_and_keeps_the_call_log(
 # --- idempotency ------------------------------------------------------------------
 
 
-def test_rerunning_the_same_run_rewrites_the_same_files_and_manifest(
+def test_rerunning_a_completed_run_fetches_nothing_and_keeps_the_original(
     mem_fs: MemoryFileSystem, session_factory: sessionmaker[Session]
 ) -> None:
     # GIVEN a completed run
     _run(FakeApi(), mem_fs, session_factory)
     first_files = _files(mem_fs)
-    first_manifest = mem_fs.cat_file(MANIFEST)
+    first_pages = {f: mem_fs.cat_file(f) for f in first_files}
 
-    # WHEN the same run_id / run_after runs again
-    outcome = _run(FakeApi(), mem_fs, session_factory)
+    # WHEN the same run_id / run_after runs again (Airflow clear, manual rerun)
+    api = FakeApi()
+    outcome = _run(api, mem_fs, session_factory)
 
-    # THEN the same paths exist with a byte-identical manifest
+    # THEN it reports the run as already complete without calling the API
+    assert outcome is Outcome.ALREADY_COMPLETE
+    assert api.requests == []
+    # AND the original raw objects are untouched (the API window moved; it cannot be refetched)
+    assert {f: mem_fs.cat_file(f) for f in _files(mem_fs)} == first_pages
+    # AND only the first run's calls are logged
+    assert [r.page_no for r in _log_rows(session_factory)] == [1, 2]
+
+
+def test_a_run_that_failed_before_its_manifest_is_fetched_again(
+    mem_fs: MemoryFileSystem, session_factory: sessionmaker[Session]
+) -> None:
+    # GIVEN a run that wrote page 1 and then failed (no manifest)
+    leftover = f"{RUN_PREFIX}/page=001.parquet"
+    mem_fs.pipe_file(leftover, b"partial")
+
+    # WHEN the run is retried
+    api = FakeApi()
+    outcome = _run(api, mem_fs, session_factory)
+
+    # THEN it is collected from scratch and the leftover page is replaced
     assert outcome is Outcome.COLLECTED
-    assert _files(mem_fs) == first_files
-    assert mem_fs.cat_file(MANIFEST) == first_manifest
-    # AND the call log grows by the calls actually made (2 + 2), all under the same run_id
-    rows = _log_rows(session_factory)
-    assert [r.page_no for r in rows] == [1, 2, 1, 2]
-    assert {r.run_id for r in rows} == {RUN_ID}
+    assert api.page_nos == ["1", "2"]
+    assert mem_fs.cat_file(leftover) != b"partial"
+    assert _manifest(mem_fs)["pages"] == [1, 2]
+
+
+# --- stale run_after --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "offset",
+    [
+        timedelta(
+            minutes=-10, microseconds=-1
+        ),  # run_after too far in the past (late or catchup run)
+        timedelta(minutes=10, microseconds=1),  # run_after too far in the future
+    ],
+)
+def test_run_after_beyond_the_max_lag_is_skipped_without_any_request_file_or_log(
+    mem_fs: MemoryFileSystem, session_factory: sessionmaker[Session], offset: timedelta
+) -> None:
+    # GIVEN fetch_max_lag_min=10 and a run_after just over 10 minutes away from now
+    api = FakeApi()
+    settings = _settings(fetch_max_lag_min=10)
+
+    # WHEN the flow runs
+    outcome = _run(api, mem_fs, session_factory, settings=settings, run_after=NOW + offset)
+
+    # THEN it is skipped as stale: no HTTP request, no file, no call log
+    assert outcome is Outcome.SKIPPED_STALE
+    assert api.requests == []
+    assert _files(mem_fs) == []
+    assert _log_rows(session_factory) == []
+
+
+def test_run_after_exactly_at_the_max_lag_is_still_fetched(
+    mem_fs: MemoryFileSystem, session_factory: sessionmaker[Session]
+) -> None:
+    # GIVEN a run_after exactly fetch_max_lag_min before now
+    api = FakeApi()
+    settings = _settings(fetch_max_lag_min=10)
+
+    # WHEN the flow runs
+    outcome = _run(
+        api, mem_fs, session_factory, settings=settings, run_after=NOW - timedelta(minutes=10)
+    )
+
+    # THEN the boundary is inclusive: it is collected
+    assert outcome is Outcome.COLLECTED
+    assert api.page_nos == ["1", "2"]

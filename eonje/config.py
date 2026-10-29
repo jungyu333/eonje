@@ -26,6 +26,8 @@ class Settings(DatabaseSettings):
     # 수집
     status_period_min: int = Field(default=10, ge=1, le=10)
     status_interval_min: int = Field(default=10, gt=0)
+    # run_after와 지금의 차이 허용치. 넘으면 API 창(최근 N분)이 그 run을 덮지 못해 받지 않는다
+    fetch_max_lag_min: int = Field(default=10, ge=1)
     serve_zcodes: list[str] = Field(default_factory=list)
 
     # 저장

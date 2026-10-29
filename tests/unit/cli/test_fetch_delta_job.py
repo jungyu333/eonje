@@ -11,6 +11,8 @@ from eonje.collect.delta import DeltaResult, Outcome
     ("outcome", "expected"),
     [
         (Outcome.COLLECTED, exit_codes.OK),
+        (Outcome.ALREADY_COMPLETE, exit_codes.OK),
+        (Outcome.SKIPPED_STALE, exit_codes.SKIPPED),
         (Outcome.SKIPPED_BUDGET, exit_codes.SKIPPED),
     ],
 )
