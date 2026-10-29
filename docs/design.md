@@ -303,6 +303,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - 상한 = `floor(EONJE_API_DAILY_LIMIT × EONJE_BUDGET_SAFETY_RATIO) − EONJE_BUDGET_RESERVE_CALLS`. 기본 1000 × 0.95 − 0 = 950 (NFR-01: 한도 95% 전에 멈춤)
   - 남은 호출 = 상한 − 오늘 사용량. 페이지마다 최대 `api_max_attempts`번 시도하므로 **페이지 상한 = 남은 호출 // api_max_attempts**. 재시도가 몰려도 한도를 넘을 수 없다. 1페이지도 안 되면 그 run은 호출 없이 건너뛴다
   - 첫 버전(2단계)의 단순화: 남은 호출을 지금 run에 모두 허용한다. 평소 사용량(하루 약 485회)이 상한보다 한참 낮아서다. **잔여 실행 횟수에 맞춘 배분은 5단계**, **마스터 DAG 몫 예약(`EONJE_BUDGET_RESERVE_CALLS`를 마스터 1회분 = 53 × api_max_attempts 이상으로)은 마스터 수집이 생기는 3단계**에서
+  - 동시 실행 경쟁: 판단(`count_calls` → `decide`)과 호출 사이에 다른 수집 잡이 호출하면 두 잡이 같은 사용량을 보고 각자 상한만큼 쓸 수 있다. 지금은 수집 잡이 `fetch_delta` 하나이고 안전 비율·예약분이 흡수한다. **`fetch_master`가 생기는 3단계에서 수집 잡을 직렬화한다**: Airflow pool `evcharger_api`(슬롯 1)에 두 수집 태스크를 넣는 것이 기본안. 수동 CLI 실행까지 막아야 하면 수집 동안 Postgres advisory lock(`pg_advisory_lock`)을 잡는다
 - 페이지 사이 상태 변화: 한 수집 안에서 페이지가 다른 시각에 조회되므로, 관측 시각은 페이지 응답 시각이 아니라 **수집 시작 시각(버킷)**으로 통일. 원본에는 페이지 응답 시각도 남김.
 - 페이징 드리프트 (2026.10.29 첫 실수집에서 확인): 페이지를 받는 사이에 최근 N분 창이 움직여 `totalCount`가 바뀐다. 실측 1페이지 13,297 → 0.9초 뒤 2페이지 13,290, 받은 행 13,290 (모두 고유, 중복 없음). 응답이 `statUpdDt` 순으로 정렬돼 있지 않아서, 행이 빠지면 페이지 경계의 행이 어느 페이지에도 안 들어갈 수 있다 (누락).
   - manifest에 `page_size`, `expected_pages`를 남긴다. 받은 페이지 < `expected_pages`면 **예산 잘림**, 다 받았는데 `row_count ≠ total_count`면 **드리프트** (`drift = total_count − row_count`, 양수는 누락, 음수는 중복 가능성)로 구분해 경고한다
@@ -381,7 +382,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 3. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
 4. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
 
-예산 판단을 별도 태스크(`check_budget` → XCom으로 상한 전달)로 두지 않는다 (2026.10.29). 판단과 호출 사이에 다른 잡이 호출하면 넘겨받은 상한이 낡기 때문에, 호출하는 잡이 시작할 때 직접 판단한다. 남은 예산은 `fetch_delta` 로그와 `api_call_log`로 본다.
+예산 판단을 별도 태스크(`check_budget` → XCom으로 상한 전달)로 두지 않는다 (2026.10.29). 별도 태스크면 판단과 호출 사이가 컨테이너 기동만큼 벌어져 상한이 낡기 쉽다. 호출하는 잡이 시작할 때 직접 판단해 그 구간을 줄이고, 남는 경쟁은 수집 잡 직렬화로 막는다 (5장). 남은 예산은 `fetch_delta` 로그와 `api_call_log`로 본다.
 
 2~4는 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을 수 있다. 묶을지는 소요 시간을 재 보고 정한다.
 
@@ -521,6 +522,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 
 - `period=1`이 0건인 이유 (상류 반영 주기). 다른 시각에 재확인
 - 저녁 피크의 `period=10` totalCount (3페이지 넘는지)
+- 수집 잡 직렬화 방식: Airflow pool만으로 충분한지, advisory lock까지 둘지 (3단계 `fetch_master` 때, 5장)
 - `getChargerStatus`의 `statId` 필터 동작 (알림용 집중 폴링 전제)
 - 운영기관별 `statUpdDt` 의미 분류 — 데이터 쌓이면 기관별 갱신 간격 분포로 판별
 - 운영계정 전환 시점과 요건 (서비스 URL 필요 여부)
