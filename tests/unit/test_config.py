@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -171,6 +172,47 @@ def test_status_period_within_bounds_is_accepted(
 
     # THEN it is accepted as-is
     assert settings.status_period_min == int(value)
+
+
+def test_fetch_max_lag_defaults_to_the_status_period(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a status period of 5 minutes and no explicit max lag
+    monkeypatch.setenv("EONJE_STATUS_PERIOD_MIN", "5")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the max lag follows the API window
+    assert settings.fetch_max_lag_min is None
+    assert settings.fetch_max_lag == timedelta(minutes=5)
+
+
+@pytest.mark.parametrize("lag", ["1", "5"])
+def test_fetch_max_lag_within_the_status_period_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, lag: str
+) -> None:
+    # GIVEN a max lag at most the status period
+    monkeypatch.setenv("EONJE_STATUS_PERIOD_MIN", "5")
+    monkeypatch.setenv("EONJE_FETCH_MAX_LAG_MIN", lag)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is used as given
+    assert settings.fetch_max_lag == timedelta(minutes=int(lag))
+
+
+def test_fetch_max_lag_beyond_the_status_period_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN a max lag longer than the API window
+    monkeypatch.setenv("EONJE_STATUS_PERIOD_MIN", "5")
+    monkeypatch.setenv("EONJE_FETCH_MAX_LAG_MIN", "10")
+
+    # WHEN / THEN loading fails, naming both settings
+    with pytest.raises(ValidationError, match="fetch_max_lag_min .* must not exceed"):
+        Settings()  # type: ignore[call-arg]
 
 
 def test_status_interval_of_zero_is_rejected(

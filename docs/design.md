@@ -338,7 +338,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, page_size, expected_pages, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않는다. 받은 페이지 < `expected_pages`면 예산 상한으로 잘린 run, 페이지를 다 받았는데 `row_count ≠ total_count`면 페이징 드리프트 (5장)
 - **완료된 run은 다시 받지 않는다** (2026.10.29). API는 '지금부터 최근 N분'만 주므로, 같은 run을 나중에 받으면 다른 데이터에 예전 `collected_at`이 붙고 `start`가 원래 원본을 지운다. 원본은 다시 받을 수 없다
   - manifest가 있으면 호출 없이 성공 (종료 코드 0)
-  - `run_after`가 지금과 `EONJE_FETCH_MAX_LAG_MIN`(기본 10분)보다 멀면 호출 없이 건너뜀 (99). 밀린 run, catchup
+  - `run_after`가 지금과 `EONJE_FETCH_MAX_LAG_MIN`(기본 = `EONJE_STATUS_PERIOD_MIN`, 그보다 클 수 없음)보다 멀면 호출 없이 건너뜀 (99). 밀린 run, catchup
   - manifest가 없는 run(중간 실패)만 run 폴더를 비우고 다시 받는다. 다시 수집하고 싶으면 새 run_id
 - 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 

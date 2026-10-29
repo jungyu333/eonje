@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from enum import StrEnum
 
 import httpx
@@ -68,7 +68,7 @@ def collect_delta(
     API는 '지금부터 최근 N분'만 돌려준다. 그래서 같은 run을 나중에 다시 받으면 다른 데이터에
     예전 시각이 붙고, 완료된 원본은 지워진다. 이를 막으려고 호출 전에 두 가지를 확인한다.
     - 완료된 run(manifest 있음)은 다시 받지 않는다. 다시 수집하려면 새 run_id를 쓴다
-    - run_after가 지금과 fetch_max_lag_min보다 멀면 받지 않는다 (밀린 run, catchup)
+    - run_after가 지금과 settings.fetch_max_lag보다 멀면 받지 않는다 (밀린 run, catchup)
     manifest가 없는 run(중간 실패)은 그대로 다시 받는다.
     """
     require_aware("run_after", run_after)
@@ -91,15 +91,15 @@ def collect_delta(
 
     current = now()
     lag = current - run_after
-    max_lag = timedelta(minutes=s.fetch_max_lag_min)
+    max_lag = s.fetch_max_lag
     if abs(lag) > max_lag:
         log.warning(
-            "run_after %s is %s from now (%s), beyond fetch_max_lag_min=%d; "
+            "run_after %s is %s from now (%s), beyond the max lag %s; "
             "the API window cannot cover it, skipping",
             run_after.isoformat(),
             lag,
             current.isoformat(),
-            s.fetch_max_lag_min,
+            max_lag,
         )
         return DeltaResult(Outcome.SKIPPED_STALE, None, None)
 

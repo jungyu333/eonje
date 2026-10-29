@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,8 +27,9 @@ class Settings(DatabaseSettings):
     # 수집
     status_period_min: int = Field(default=10, ge=1, le=10)
     status_interval_min: int = Field(default=10, gt=0)
-    # run_after와 지금의 차이 허용치. 넘으면 API 창(최근 N분)이 그 run을 덮지 못해 받지 않는다
-    fetch_max_lag_min: int = Field(default=10, ge=1)
+    # run_after와 지금의 차이 허용치. 비우면 status_period_min과 같다.
+    # API 창(최근 status_period_min분)보다 클 수 없다. 크면 창이 덮지 못하는 run까지 받는다
+    fetch_max_lag_min: int | None = Field(default=None, ge=1)
     serve_zcodes: list[str] = Field(default_factory=list)
 
     # 저장
@@ -37,6 +39,20 @@ class Settings(DatabaseSettings):
     s3_endpoint_url: str = "http://127.0.0.1:8333"
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
+
+    @property
+    def fetch_max_lag(self) -> timedelta:
+        return timedelta(minutes=self.fetch_max_lag_min or self.status_period_min)
+
+    @model_validator(mode="after")
+    def _lag_within_api_window(self) -> Settings:
+        if self.fetch_max_lag_min is not None and self.fetch_max_lag_min > self.status_period_min:
+            raise ValueError(
+                f"fetch_max_lag_min ({self.fetch_max_lag_min}) must not exceed "
+                f"status_period_min ({self.status_period_min}): the API window would not cover "
+                "the accepted run_after"
+            )
+        return self
 
     @field_validator("api_service_key", mode="before")
     @classmethod

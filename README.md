@@ -64,7 +64,7 @@ make run JOB=fetch-delta RUN_ID=manual__1 RUN_AFTER=$(date -u +%Y-%m-%dT%H:%M:%S
 ```
 
 - `RUN_AFTER`는 Airflow의 `run_after` 자리다. 수집 시각과 날짜 파티션(KST)이 이 값으로 정해진다
-- API는 지금부터 최근 10분만 주므로, `RUN_AFTER`가 지금과 10분(`EONJE_FETCH_MAX_LAG_MIN`) 넘게 차이 나면 받지 않는다
+- API는 지금부터 최근 10분(`EONJE_STATUS_PERIOD_MIN`)만 주므로, `RUN_AFTER`가 지금과 그보다 멀면 받지 않는다
 - 완료된 run은 다시 받지 않는다. 같은 `RUN_ID`로 다시 돌리면 호출 없이 끝나므로, 다시 수집하려면 새 `RUN_ID`를 쓴다
 - 종료 코드: `0` 수집 완료 또는 이미 완료된 run, `99` 건너뜀(예산 소진, 늦은 `RUN_AFTER`), `1` 실패, `2` 사용법·설정 오류
 
