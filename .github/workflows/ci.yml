@@ -64,6 +64,8 @@ jobs:
           POSTGRES_BIND=127.0.0.1
           EONJE_DB_PASSWORD=ci-eonje
           AIRFLOW_DB_PASSWORD=ci-airflow
+          EONJE_S3_ACCESS_KEY=ci-s3-access
+          EONJE_S3_SECRET_KEY=ci-s3-secret
           EONJE_DATABASE_URL=postgresql+psycopg://eonje:ci-eonje@127.0.0.1:5432/eonje
           EOF
 
