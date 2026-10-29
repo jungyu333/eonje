@@ -36,12 +36,14 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # --help는 settings 없이도 돈다. registry가 모든 job 모듈을 import하므로
+      # 의존성(httpx, pyarrow, s3fs, sqlalchemy) 누락은 여기서 잡힌다.
+      # job 실행 자체는 DB·S3가 있어야 해서 db job의 테스트가 맡는다.
       - name: smoke test
         run: |
-          set +e
-          docker run --rm -e EONJE_API_SERVICE_KEY=dummy eonje-collector:ci fetch-delta --run-id ci__smoke
-          code=$?
-          test "$code" -eq 2
+          docker run --rm eonje-collector:ci --help > help.txt
+          cat help.txt
+          grep -q fetch-delta help.txt
 
   db:
     runs-on: ubuntu-latest
