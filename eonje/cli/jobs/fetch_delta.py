@@ -81,7 +81,7 @@ def fetch_delta(
         dt=partition_date(ctx.run_after),
         run_key=run_key_from_run_id(ctx.run_id),
     )
-    writer = RawRunWriter(fs, s.raw_bucket, raw_run, ctx.run_after)
+    writer = RawRunWriter(fs, s.raw_bucket, raw_run, ctx.run_after, page_size=s.page_size)
 
     writer.start()
 
@@ -101,8 +101,18 @@ def fetch_delta(
         manifest.run_key,
     )
 
-    if manifest.row_count < manifest.total_count:
+    if manifest.truncated:
         log.warning(
-            "run truncated by budget cap: %d of %d rows", manifest.row_count, manifest.total_count
+            "run truncated by budget cap: %d of %d pages",
+            len(manifest.pages),
+            manifest.expected_pages,
+        )
+    elif manifest.drift:
+        # 페이지 사이에 최근 N분 창이 움직였다. 양수면 누락, 음수면 중복 가능성
+        log.warning(
+            "totalCount drifted during paging: %d rows written, page 1 reported %d (drift %+d)",
+            manifest.row_count,
+            manifest.total_count,
+            manifest.drift,
         )
     return exit_codes.OK

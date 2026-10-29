@@ -157,6 +157,8 @@ def test_normal_run_exits_ok_and_writes_both_pages_and_the_manifest(
     assert manifest["pages"] == [1, 2]
     assert manifest["total_count"] == FIXTURE_TOTAL
     assert manifest["row_count"] == 2 * FIXTURE_ITEMS
+    assert manifest["page_size"] == 9999
+    assert manifest["expected_pages"] == 2
 
 
 def test_normal_run_logs_one_call_per_page_tagged_with_job_and_run_id(
@@ -228,7 +230,9 @@ def test_insufficient_budget_skips_without_any_request_file_or_log(
 
 
 def test_budget_cap_of_one_page_truncates_the_run(
-    mem_fs: MemoryFileSystem, session_factory: sessionmaker[Session]
+    mem_fs: MemoryFileSystem,
+    session_factory: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # GIVEN a budget of 3 calls at 3 attempts per page -> cap of 1 page
     api = FakeApi()
@@ -243,7 +247,30 @@ def test_budget_cap_of_one_page_truncates_the_run(
     manifest = _manifest(mem_fs)
     assert manifest["pages"] == [1]
     assert manifest["row_count"] < manifest["total_count"]
+    assert manifest["expected_pages"] == 2
     assert not mem_fs.exists(f"{RUN_PREFIX}/page=002.parquet")
+    # AND the warning names the budget cap, not drift
+    assert "run truncated by budget cap: 1 of 2 pages" in caplog.text
+    assert "drifted" not in caplog.text
+
+
+def test_all_pages_with_fewer_rows_than_total_is_logged_as_drift_not_truncation(
+    mem_fs: MemoryFileSystem,
+    session_factory: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # GIVEN an API that returns 2 pages whose rows do not add up to totalCount
+    api = FakeApi()
+
+    # WHEN the job runs with enough budget for both pages
+    code = _run(api, mem_fs, session_factory)
+
+    # THEN it exits OK and warns about drift, not about the budget
+    assert code == exit_codes.OK
+    drift = FIXTURE_TOTAL - 2 * FIXTURE_ITEMS
+    assert f"totalCount drifted during paging: {2 * FIXTURE_ITEMS} rows written" in caplog.text
+    assert f"(drift {drift:+d})" in caplog.text
+    assert "truncated" not in caplog.text
 
 
 @pytest.mark.parametrize(
