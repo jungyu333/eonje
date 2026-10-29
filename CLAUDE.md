@@ -11,11 +11,13 @@ Design: `docs/design.md`. Requirements: `docs/requirements.md`. Read both before
 
 ```
 eonje/        # Pure Python package. Never imports airflow.
-  cli/        # Task entrypoint: python -m eonje.cli <job> --run-id <id>
+  cli/        # Task entrypoint: python -m eonje.cli <job> --run-id <id> --run-after <iso8601>
               #   app.py (parse, dispatch, exit code) · registry.py (name -> job) · jobs/ (one module per DAG task, wiring only)
   config.py   # Settings (pydantic-settings, EONJE_ prefix). The only place env vars are read.
   client/     # API client: request building, pagination, retry, response validation
   budget/     # Daily call budget: usage lookup, run/skip decision, page cap
+  collect/    # Collection flows (budget -> paging -> raw run). Combines client/budget/storage; HTTP client,
+              #   filesystem and DB session factory are injected, never built here. Returns an outcome, not an exit code.
   storage/    # raw.py (Parquet write, collector), spark.py (SparkSession, s3a read, JDBC staging write),
               #   models.py (SQLAlchemy ORM), db.py (engine, staging -> INSERT ... ON CONFLICT)
   transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O.
@@ -48,8 +50,9 @@ docs/         # design.md, requirements.md
 
 ## Data Rules
 
-- Every task is **idempotent per `run_id`**: rerunning the same run produces the same tables. Raw: overwrite the
-  `run=<ts>` directory. `obs_status`: ignore on conflict. Transitions/sessions: upsert. Aggregates: delete the window,
+- Every task is **idempotent per `run_id`**: rerunning the same run produces the same tables. Raw: a completed run (manifest
+  present) is never fetched again, because the API only serves the last N minutes and a refetch would relabel new data
+  and delete the original; only an incomplete run is cleared and fetched again. `obs_status`: ignore on conflict. Transitions/sessions: upsert. Aggregates: delete the window,
   recompute.
 - `statUpdDt` is **not** a transition time (operator-dependent heartbeat). Transitions are derived by comparing against
   `charger_state`.
@@ -62,7 +65,7 @@ docs/         # design.md, requirements.md
 ## Spark Rules
 
 - Collection is plain Python; every transform/aggregate after it runs on Spark (single engine, standalone, client mode).
-- Read/write only via `s3a://` (MinIO) and JDBC — never local paths (executors on other nodes cannot see them).
+- Read/write only via `s3a://` (SeaweedFS S3) and JDBC — never local paths (executors on other nodes cannot see them).
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
 - jars and packages are baked into the `eonje-spark` image; never fetched at runtime.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
@@ -71,10 +74,10 @@ docs/         # design.md, requirements.md
 
 - Images per runtime under `docker/`; image name = folder name (`eonje-collector`, `eonje-spark`, `eonje-ml`,
   `eonje-api`).
-  Same entrypoint everywhere: `python -m eonje.cli <job> --run-id <id>`. Airflow's image never contains eonje or Spark.
+  Same entrypoint everywhere: `python -m eonje.cli <job> --run-id <id> --run-after <iso8601>`. Airflow's image never contains eonje or Spark.
 - Images are pushed to GHCR tagged with the git sha. **No code on servers**: a node holds only `compose.yaml`, `.env`,
   and volumes. DAGs reach Airflow via GitDagBundle tracking the `deploy` ref, which CD moves after images are pushed.
-- Node A (always on): Airflow, Postgres, MinIO, collector, API, cloudflared, Spark master (+worker until B).
+- Node A (always on): Airflow, Postgres, SeaweedFS (S3), collector, API, cloudflared, Spark master (+worker until B).
   Node B (added on measured need): Spark worker, monitoring, local backup, model training. Stateful services stay on A.
 - No inbound ports: public traffic via Cloudflare Tunnel, admin access via Tailscale.
 - Details: `docs/design.md` sections 2.3, 2.5, 8.
@@ -98,7 +101,7 @@ make check        # lint + typecheck + test — same as CI
 make test ARGS="-k cli"
 make test-debug   # -x -vv -l -s, stop at first failure with locals
 make build        # build runtime images under docker/ (eonje-collector:dev)
-make run JOB=fetch-delta RUN_ID=manual__x
+make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
 ```
 
 ## Output Language

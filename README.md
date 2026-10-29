@@ -23,6 +23,61 @@
 - [요구사항](docs/requirements.md) — 무엇을 만들고 만들지 않는지, 수용 기준
 - [설계](docs/design.md) — 아키텍처, 데이터 모델, 수집 전략, 기술 스택
 
+## 로컬에서 수집 돌려 보기
+
+필요한 것: [uv](https://docs.astral.sh/uv/), Docker, 공공데이터포털 EvCharger API 서비스 키.
+
+**1. 설정**
+
+```bash
+make install
+cp infra/.env.example .env
+```
+
+`.env`에서 `CHANGE_ME`와 빈 값을 채운다. 개발 PC에서는 호스트를 `127.0.0.1`로 바꾼다
+(`localhost`는 Windows·Docker Desktop에서 IPv6로 먼저 붙어 멈출 수 있다).
+
+```dotenv
+EONJE_API_SERVICE_KEY=<발급받은 키>
+EONJE_DATABASE_URL=postgresql+psycopg://eonje:<EONJE_DB_PASSWORD>@127.0.0.1:5432/eonje
+EONJE_S3_ENDPOINT_URL=http://127.0.0.1:8333
+EONJE_S3_ACCESS_KEY=<임의 값>
+EONJE_S3_SECRET_KEY=<임의 값>
+```
+
+S3 키는 SeaweedFS가 이 값으로 계정을 만들므로 아무 값이나 정하면 된다. 비어 있으면 빈 키로 열린 저장소가
+뜨지 않도록 compose가 멈춘다. 그래서 `make up SERVICES=postgres`처럼 S3를 안 쓰는 명령도 키를 먼저 채워야 한다.
+
+**2. 인프라와 스키마**
+
+```bash
+make up        # Postgres + SeaweedFS
+make migrate   # eonje DB에 테이블 생성
+make buckets   # 원본 버킷 생성 (이미 있으면 그대로 성공)
+```
+
+**3. 수집 1회**
+
+```bash
+# RUN_AFTER는 지금 시각(UTC). PowerShell: (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss+00:00")
+make run JOB=fetch-delta RUN_ID=manual__1 RUN_AFTER=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+```
+
+- `RUN_AFTER`는 Airflow의 `run_after` 자리다. 수집 시각과 날짜 파티션(KST)이 이 값으로 정해진다
+- API는 지금부터 최근 10분(`EONJE_STATUS_PERIOD_MIN`)만 주므로, `RUN_AFTER`가 지금과 그보다 멀면 받지 않는다
+- 완료된 run은 다시 받지 않는다. 같은 `RUN_ID`로 다시 돌리면 호출 없이 끝나므로, 다시 수집하려면 새 `RUN_ID`를 쓴다
+- 종료 코드: `0` 수집 완료 또는 이미 완료된 run, `99` 건너뜀(예산 소진, 늦은 `RUN_AFTER`), `1` 실패, `2` 사용법·설정 오류
+
+**4. 결과 확인**
+
+- 원본: `eonje-raw/charger_status/dt=<KST 날짜>/run=<run_key>/` 아래 `page=NNN.parquet`와
+  `_manifest.json`. manifest가 있어야 완료된 run이다
+- 호출 기록: `make psql` 후 `SELECT * FROM api_call_log ORDER BY id DESC LIMIT 5;`
+- 로그 경고: `run truncated by budget cap`은 예산 때문에 페이지를 덜 받은 것,
+  `totalCount drifted during paging`은 페이지 사이에 원본이 바뀐 것 ([설계 §5](docs/design.md#5-수집-전략))
+
+DB 테스트는 `make up` 상태에서 `make test-db`로 돈다 (세션마다 임시 스키마를 만들고 지운다).
+
 ## 상태
 
 초기 구축 중. 수집기부터 올린다.

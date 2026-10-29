@@ -11,6 +11,7 @@ from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait
 from tenacity.wait import wait_base
 
 from eonje.client.errors import ApiError, TransientError
+from eonje.client.paging import page_count
 from eonje.client.response import parse_response
 from eonje.client.types import CallRecord, Page
 from eonje.config import Settings
@@ -63,7 +64,7 @@ class EvChargerClient:
         first = self.fetch_page(operation, 1, params)
         yield first
 
-        last = _page_count(first.total_count, self._settings.page_size)
+        last = page_count(first.total_count, self._settings.page_size)
 
         if max_pages is not None:
             last = min(last, max_pages)
@@ -117,7 +118,3 @@ class EvChargerClient:
                     total_count=total,
                 )
             )
-
-
-def _page_count(total_count: int, page_size: int) -> int:
-    return max(1, -(-total_count // page_size))

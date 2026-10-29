@@ -32,7 +32,7 @@ flowchart LR
         ML[학습·추론 태스크<br/>eonje-ml]
     end
 
-    COL -->|원본 그대로| RAW[(원본 Parquet<br/>MinIO)]
+    COL -->|원본 그대로| RAW[(원본 Parquet<br/>SeaweedFS)]
     RAW -->|s3a| SPK
     SPK -->|JDBC 스테이징 → upsert| DB[(Postgres eonje DB)]
     DB --> ML
@@ -66,14 +66,14 @@ flowchart LR
 
   | 이미지 | Dockerfile | 내용 | 쓰는 곳 |
   |---|---|---|---|
-  | `eonje-collector` | `docker/tasks/collector/` | python:3.11-slim + uv + eonje (httpx, pyarrow, s3fs) | `check_budget`, `fetch_*` |
+  | `eonje-collector` | `docker/tasks/collector/` | python:3.11-slim + uv + eonje (httpx, pyarrow, s3fs) | `fetch_*` |
   | `eonje-spark` | `docker/tasks/spark/` | Spark + PySpark + eonje + s3a·JDBC jar | Spark 드라이버(태스크), master, worker 공용 — 명령만 다름. Spark·Python 버전이 자동으로 일치 |
   | `eonje-ml` | `docker/tasks/ml/` | eonje + LightGBM 등 | 학습·배치 추론 (9단계) |
   | `eonje-api` | `docker/api/` | eonje + FastAPI | 조회 API |
 
-- 태스크는 `@task.docker(image="ghcr.io/jungyu333/eonje-<runtime>:<sha>", command=["python", "-m", "eonje.cli", "<job>", "--run-id", ...])`. 진입점은 모든 태스크 이미지에서 같다
-- 태스크 간 데이터는 XCom이 아니라 MinIO·DB를 거친다. XCom은 run_id·건수·페이지 상한 같은 작은 값만
-- 네트워크: 수집 태스크는 compose 네트워크에 붙어 Postgres·MinIO에 접근. Spark 드라이버 태스크는 `network_mode: host` (다른 노드의 executor가 드라이버에 접속해야 함, 8.2)
+- 태스크는 `@task.docker(image="ghcr.io/jungyu333/eonje-<runtime>:<sha>", command=["python", "-m", "eonje.cli", "<job>", "--run-id", <run_id>, "--run-after", <dag_run.run_after>])`. 진입점은 모든 태스크 이미지에서 같다. `--run-after`(ISO 8601, 오프셋 필수)가 수집 시각과 날짜 파티션을 정하므로 둘 다 필수다
+- 태스크 간 데이터는 XCom이 아니라 SeaweedFS·DB를 거친다. XCom은 run_id·건수·페이지 상한 같은 작은 값만
+- 네트워크: 수집 태스크는 compose 네트워크에 붙어 Postgres·SeaweedFS에 접근. Spark 드라이버 태스크는 `network_mode: host` (다른 노드의 executor가 드라이버에 접속해야 함, 8.2)
 - 원격 실행: 모델 학습 등 Spark가 아닌 무거운 태스크는 `@task.docker(docker_url=<B>)`로 B 노드의 Docker에서 실행 (8.1)
 - 효과: Airflow와 파이프라인 의존성 완전 분리. "`eonje`는 Airflow 없이 돈다"는 경계가 런타임에서 강제됨. 이미지가 런타임별이라 수집 이미지에 Spark가 없고, Spark 이미지 크기가 수집 배포를 느리게 하지 않는다
 - 비용: scheduler에 `/var/run/docker.sock` 마운트(호스트 root 상당 권한 — 1인 홈서버에서 감수), 태스크당 컨테이너 기동 수 초(10분 주기엔 무시)
@@ -83,14 +83,15 @@ flowchart LR
 ```
 eonje/
   eonje/                  # 순수 Python 패키지. Airflow를 import하지 않는다
-    cli/                  # 태스크 진입점: `python -m eonje.cli <job> --run-id ...`
+    cli/                  # 태스크 진입점: `python -m eonje.cli <job> --run-id ... --run-after ...`
       __main__.py         # app.main 위임만
       app.py              # 인자 파싱, 설정 로드, job 디스패치, 종료 코드
       registry.py         # job 이름 → 함수 매핑
-      jobs/               # job 하나 = 모듈 하나 = DAG 태스크 하나. client·storage·transform 배선만, 로직 없음
+      jobs/               # job 하나 = 모듈 하나 = DAG 태스크 하나. 의존성 생성과 결과 → 종료 코드 변환만, 로직 없음
     config.py             # 설정값 (한도·간격·지역·페이지 크기·Spark master 등). EONJE_ 환경변수·.env에서 로드
     client/               # API 클라이언트: 요청 조립, 페이지네이션, 재시도, 응답 검증
     budget/               # 호출 예산: 오늘 사용량 조회, 실행 가능 여부·페이지 상한 판단
+    collect/              # 수집 흐름: 완료·지연 확인 → 예산 판단 → 페이지 순회 → 원본 run 쓰기. client·budget·storage를 조합하고, HTTP·파일시스템·DB 세션은 주입받는다
     storage/
       raw.py              # 원본 Parquet 경로 규칙, 쓰기(수집) — pyarrow + s3fs
       spark.py            # SparkSession 생성(설정 주입), s3a 읽기, JDBC 스테이징 쓰기
@@ -117,7 +118,7 @@ eonje/
   web/                    # 프론트 (후순위)
   docs/                   # 이 문서들
   infra/
-    compose.node-a.yaml   # 상시 노드: airflow, postgres, minio, spark master·worker, eonje-api, cloudflared. 개발 PC도 이것을 사용
+    compose.node-a.yaml   # 상시 노드: airflow, postgres, seaweedfs, spark master·worker, eonje-api, cloudflared. 개발 PC도 이것을 사용
     compose.node-b.yaml   # 보조 노드: spark worker, 모니터링, 로컬 백업 (B 추가 시)
     postgres/init.sh      # 첫 기동 시 airflow·eonje DB와 역할 생성. 비밀번호는 .env (compose configs로 주입)
     migrations/           # Alembic — models.py에서 autogenerate, 검토 후 커밋
@@ -137,7 +138,7 @@ eonje/
 - 설정값은 `config.py`에서만 읽는다. DAG 스케줄 간격도 거기서 가져온다 (DAG 파일은 환경변수를 직접 읽음 — eonje import 불가).
 - **`__init__.py`에는 로직을 두지 않는다.** 전부 빈 파일. re-export도 하지 않아 import는 항상 모듈까지 적는다 (`from eonje.cli.app import main`). `__main__.py`는 위임 두 줄만.
 - **DB 스키마의 단일 출처는 `models.py`.** 파이프라인 적재와 API 조회가 같은 모델을 쓴다. 대량 적재는 Spark → JDBC 스테이징 테이블 → `INSERT ... ON CONFLICT`. 행 단위 `session.add`는 금지.
-- **Spark 규칙 (처음부터 지킨다):** 데이터는 `s3a://`(MinIO)와 JDBC로만 읽고 쓴다 — 로컬 경로 금지(다른 노드의 executor가 못 읽음). jar·패키지는 전부 이미지에 넣는다. 큰 데이터에 `collect()`·`toPandas()` 금지. `spark.sql.session.timeZone=Asia/Seoul`을 명시한다.
+- **Spark 규칙 (처음부터 지킨다):** 데이터는 `s3a://`(SeaweedFS)와 JDBC로만 읽고 쓴다 — 로컬 경로 금지(다른 노드의 executor가 못 읽음). jar·패키지는 전부 이미지에 넣는다. 큰 데이터에 `collect()`·`toPandas()` 금지. `spark.sql.session.timeZone=Asia/Seoul`을 명시한다.
 
 ### 2.5 런타임 토폴로지
 
@@ -150,7 +151,7 @@ flowchart TB
         DP[airflow dag-processor<br/>GitDagBundle]
         TK[태스크 컨테이너<br/>collector · spark 드라이버]
         PG[(postgres 1 인스턴스<br/>DB: airflow · eonje)]
-        MN[(minio · raw · 모델)]
+        MN[(seaweedfs · raw · 모델)]
         SM[spark master :7077]
         SWA[spark worker<br/>B 추가 전까지]
         FA[eonje-api]
@@ -179,11 +180,11 @@ flowchart TB
     MON -.->|수집| A
 ```
 
-- **원칙: 상태를 가진 것(Postgres·MinIO)과 수집 경로·Airflow는 A에만 둔다.** B가 꺼져도 A의 수집은 계속되고, B는 A를 계산·감시·보관하는 보조 노드다. 서비스 배치는 고정 (8.1)
-- **공유기 포트는 열지 않는다.** 공개 트래픽은 Cloudflare Tunnel(나가는 연결)로 `eonje-api`에만, 관리 접근(SSH·Airflow·Spark·MinIO 콘솔·Grafana)은 Tailscale로만
+- **원칙: 상태를 가진 것(Postgres·SeaweedFS)과 수집 경로·Airflow는 A에만 둔다.** B가 꺼져도 A의 수집은 계속되고, B는 A를 계산·감시·보관하는 보조 노드다. 서비스 배치는 고정 (8.1)
+- **공유기 포트는 열지 않는다.** 공개 트래픽은 Cloudflare Tunnel(나가는 연결)로 `eonje-api`에만, 관리 접근(SSH·Airflow·Spark·SeaweedFS UI·Grafana)은 Tailscale로만
 - 로컬 개발 PC는 `compose.node-a.yaml`을 그대로 쓰고 Spark는 `local[*]`. 차이는 `.env`뿐
 - **Postgres는 인스턴스 하나, 데이터베이스 둘**(`airflow`, `eonje`)에 역할도 둘. `init.sh`로 첫 기동 시 생성(역할 비밀번호는 `.env`에서 받아 레포에 남지 않음). Airflow 메타DB를 초기화·교체해도 `eonje` DB는 무관하고, 백업은 DB 단위 `pg_dump`
-- 원본 저장소는 MinIO(S3 호환). `storage/`는 s3fs(수집)·s3a(Spark)로 다루므로 외부 객체 스토리지로 옮겨도 엔드포인트만 교체
+- 원본 저장소는 **SeaweedFS**(S3 호환, 단일 노드는 `weed server -s3` 컨테이너 하나). `storage/`는 S3 프로토콜만 쓰므로(s3fs 수집, s3a Spark) 다른 S3 호환 저장소로 옮겨도 엔드포인트만 교체. 작은 파일을 큰 볼륨 파일에 묶어 저장해서, run마다 작은 Parquet이 쌓이는 원본에 유리하다
 
 ### 2.6 처리 흐름 요약
 
@@ -220,7 +221,7 @@ flowchart TB
 | 설정 | pydantic-settings | `EONJE_` 환경변수 → 타입 검증된 설정 객체. `config.py` 하나 |
 | 수집 저장 | pyarrow + s3fs | 수집은 Spark 없이 Parquet 쓰기만 |
 | 변환·집계 | **Apache Spark (PySpark), standalone 클러스터, client 모드** | 단일 엔진. 10분 증분과 백필이 같은 코드. 노드 추가 시 worker만 붙임 (8.2) |
-| 원본 저장 | Parquet, MinIO (S3 호환) | 수집은 s3fs, Spark는 s3a |
+| 원본 저장 | Parquet, SeaweedFS (S3 호환, `weed server -s3`) | 수집은 s3fs, Spark는 s3a. S3 접속 키는 SeaweedFS S3 identity 설정(JSON)으로, 버킷은 `weed shell`의 `s3.bucket.create`로 만든다 |
 | 서비스 DB | PostgreSQL 16 (1 인스턴스, `airflow`·`eonje` 2 DB), SQLAlchemy 2 ORM (Declarative, `Mapped[]`), psycopg 3, Alembic | 모델이 스키마·마이그레이션·API 조회의 단일 출처. 적재는 Spark JDBC 스테이징 → `INSERT ... ON CONFLICT` |
 | 예측 | LightGBM, 생존분석 등 표 데이터 모델 | 주 1회 학습(B), 매시 배치 추론 → 예측 테이블. 서빙은 테이블 조회만 (10장) |
 | 자연어 요약 | 외부 LLM API | 자체 호스팅 안 함. 생성한 문장만 저장 |
@@ -230,7 +231,7 @@ flowchart TB
 | 지도 | Kakao Maps JS SDK | 국내 지도 품질·무료 쿼터. 모바일은 네이티브 SDK로 교체, 데이터는 동일 |
 | 차트 | Apache ECharts | 히트맵 내장. 7×24 격자 |
 | 공개·TLS | Cloudflare Tunnel + Cloudflare DNS (무료 플랜) | 포트포워딩·고정 IP·인증서 관리 없음. 집 IP 비노출, 기본 DDoS 방어 |
-| 관리 접근 | Tailscale | SSH, Airflow·Spark·MinIO·Grafana UI. CD 러너도 tailnet으로 접속 |
+| 관리 접근 | Tailscale | SSH, Airflow·Spark·SeaweedFS·Grafana UI. CD 러너도 tailnet으로 접속 |
 | 컨테이너 | Docker, docker compose (노드별 파일) | 개발 PC = 노드 A 구성 |
 | 이미지 레지스트리 | GHCR (`ghcr.io/jungyu333/eonje-*:<git-sha>`) | Actions `GITHUB_TOKEN`으로 푸시. 공개 이미지라 서버 pull에 인증 불필요 |
 | 운영 노드 | 집 미니PC (A 상시, B는 부족 신호 시 추가) | 8.1 |
@@ -242,7 +243,7 @@ flowchart TB
 | 백업 | 로컬: B로 `mc mirror`·`pg_dump`. 오프사이트: R2 또는 B2 | 8.5 |
 | 시크릿 | 노드의 `.env`(서버에서 직접 관리), GitHub Secrets(배포 SSH 키, Tailscale OAuth) | 레포에는 `.env.example`만 |
 
-보류한 것: Kubernetes·k3s(compose로 시작, B 추가 시 재검토 — 8.6), Celery/Redis(LocalExecutor로 충분), dbt(변환이 Spark 코드로 충분), Kafka 등 스트리밍(10분 배치면 됨), async SQLAlchemy(읽기 전용 API에 이득 적음), pandas·DuckDB 변환 경로(Spark 단일 엔진으로 통일), 포트포워딩 + certbot(Cloudflare Tunnel로 대체), self-hosted Actions runner(public 레포에서 fork PR 코드가 서버에서 돌 위험), LLM 자체 호스팅, Postgres 인스턴스 분리(DB 분리로 충분).
+보류한 것: Kubernetes·k3s(compose로 시작, B 추가 시 재검토 — 8.6), Celery/Redis(LocalExecutor로 충분), dbt(변환이 Spark 코드로 충분), Kafka 등 스트리밍(10분 배치면 됨), async SQLAlchemy(읽기 전용 API에 이득 적음), pandas·DuckDB 변환 경로(Spark 단일 엔진으로 통일), 포트포워딩 + certbot(Cloudflare Tunnel로 대체), self-hosted Actions runner(public 레포에서 fork PR 코드가 서버에서 돌 위험), LLM 자체 호스팅, Postgres 인스턴스 분리(DB 분리로 충분), MinIO(2025.10 커뮤니티 Docker 이미지·바이너리 배포 중단, 2026.04 저장소 아카이브 → 보안 패치 없음. 작은 파일 대량 저장에 유리하고 유지보수가 활발한 SeaweedFS로 대체, 2026.10.28).
 
 ## 4. 데이터 소스
 
@@ -302,12 +303,17 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - 상한 = `floor(EONJE_API_DAILY_LIMIT × EONJE_BUDGET_SAFETY_RATIO) − EONJE_BUDGET_RESERVE_CALLS`. 기본 1000 × 0.95 − 0 = 950 (NFR-01: 한도 95% 전에 멈춤)
   - 남은 호출 = 상한 − 오늘 사용량. 페이지마다 최대 `api_max_attempts`번 시도하므로 **페이지 상한 = 남은 호출 // api_max_attempts**. 재시도가 몰려도 한도를 넘을 수 없다. 1페이지도 안 되면 그 run은 호출 없이 건너뛴다
   - 첫 버전(2단계)의 단순화: 남은 호출을 지금 run에 모두 허용한다. 평소 사용량(하루 약 485회)이 상한보다 한참 낮아서다. **잔여 실행 횟수에 맞춘 배분은 5단계**, **마스터 DAG 몫 예약(`EONJE_BUDGET_RESERVE_CALLS`를 마스터 1회분 = 53 × api_max_attempts 이상으로)은 마스터 수집이 생기는 3단계**에서
+  - 동시 실행 경쟁: 판단(`count_calls` → `decide`)과 호출 사이에 다른 수집 잡이 호출하면 두 잡이 같은 사용량을 보고 각자 상한만큼 쓸 수 있다. 지금은 수집 잡이 `fetch_delta` 하나이고 안전 비율·예약분이 흡수한다. **`fetch_master`가 생기는 3단계에서 수집 잡을 직렬화한다**: Airflow pool `evcharger_api`(슬롯 1)에 두 수집 태스크를 넣는 것이 기본안. 수동 CLI 실행까지 막아야 하면 수집 동안 Postgres advisory lock(`pg_advisory_lock`)을 잡는다
 - 페이지 사이 상태 변화: 한 수집 안에서 페이지가 다른 시각에 조회되므로, 관측 시각은 페이지 응답 시각이 아니라 **수집 시작 시각(버킷)**으로 통일. 원본에는 페이지 응답 시각도 남김.
+- 페이징 드리프트 (2026.10.29 첫 실수집에서 확인): 페이지를 받는 사이에 최근 N분 창이 움직여 `totalCount`가 바뀐다. 실측 1페이지 13,297 → 0.9초 뒤 2페이지 13,290, 받은 행 13,290 (모두 고유, 중복 없음). 응답이 `statUpdDt` 순으로 정렬돼 있지 않아서, 행이 빠지면 페이지 경계의 행이 어느 페이지에도 안 들어갈 수 있다 (누락).
+  - manifest에 `page_size`, `expected_pages`를 남긴다. 받은 페이지 < `expected_pages`면 **예산 잘림**, 다 받았는데 `row_count ≠ total_count`면 **드리프트** (`drift = total_count − row_count`, 양수는 누락, 음수는 중복 가능성)로 구분해 경고한다
+  - 드리프트 크기를 4단계 품질 지표(`ops.quality_metrics`)로 쌓는다. 누락은 다음 관측의 `lastTsdt`/`lastTedt`(세션 복원)와 마스터 대조(스냅샷 보정)로 메운다
+  - 간격 재검토 (2단계 `ev_status_10min` DAG 작업 때): 10분 간격 + `period=10`은 겹침이 0이라 스케줄 지연만큼 창 사이에 틈이 생긴다. 피크 `totalCount` 실측 후 5분~8분 간격(겹침)을 예산과 함께 결정
 - 스냅샷 보정: 마스터 전체 조회의 `stat`를 기준점으로 삼아, 변경분으로 추적 중인 상태와 불일치하는 충전기를 찾아 보정 이벤트를 만든다 (놓친 전이의 사후 기록). 불일치 비율을 지표로 남긴다.
 
 ## 6. 데이터 모델
 
-### 원본 (Parquet, MinIO, run 단위)
+### 원본 (Parquet, SeaweedFS, run 단위)
 
 경로 (`storage/raw_paths.py`). 버킷은 `EONJE_RAW_BUCKET`, 접속은 `EONJE_S3_ENDPOINT_URL`·`EONJE_S3_ACCESS_KEY`·`EONJE_S3_SECRET_KEY`. 경로에는 스킴이 없고, 수집기(s3fs)는 그대로, Spark는 `s3a://`를 붙여 쓴다.
 
@@ -318,7 +324,10 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 ```
 
 - **`dt`는 수집 시각(`collected_at`)의 KST 날짜**(`partition_date`). 기록기가 `run.dt`와 맞지 않으면 거부한다 → 같은 run이 두 날짜 파티션에 생기지 않는다
-- `run_key`는 경로에 안전한 문자만(`[0-9A-Za-z_.-]`). Airflow run_id에서 결정적으로 만든다 (#8)
+- `run_key`는 경로에 안전한 문자만(`[0-9A-Za-z_.-]`). Airflow run_id에서 결정적으로 만든다 (`run_key_from_run_id`)
+  - 이미 안전한 run_id는 그대로 쓴다. 문자를 `-`로 바꾸거나 앞에 `r`을 붙였다면 끝에 `-<원문 sha256 앞 8자>`를 붙인다
+  - 이유: 치환만 하면 서로 다른 run_id(`a:b`, `a/b`, `a-b`)가 같은 `run=` 폴더가 되어, 한 run이 다른 run의 원본을 덮어쓴다
+  - 예: `scheduled__2026-10-26T01:10:00+00:00` → `scheduled__2026-10-26T01-10-00-00-00-<hash8>`
 - 컬럼: 응답 item의 필드 전부를 **string**으로 받은 그대로(미지 필드 유지, 문자열이 아닌 JSON 값은 JSON 표기 그대로) + 메타 `collected_at`(timestamp UTC), `page_fetched_at`(timestamp UTC), `page_no`(int32). 타입 변환은 정제 단계에서
 - 스키마는 페이지에 나온 필드로 정해져 페이지·run마다 컬럼 구성이 다를 수 있다. Spark는 `mergeSchema`로 읽는다 (전부 string이라 타입 충돌 없음)
 - 시각은 모두 시간대가 있어야 하고 UTC로 저장한다. 시간대 없는 시각은 거부
@@ -327,7 +336,11 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - 페이지는 메모리 버퍼에 Parquet(zstd)으로 다 쓴 뒤 한 번에 올린다 → 실패하면 객체가 생기지 않는다
 - run은 `start → write × N → finish`. `start`는 **manifest를 먼저 지우고** run 폴더를 비운다(재실행 때 지난 페이지가 남지 않음). `finish`는 모든 페이지를 쓴 뒤 **`_manifest.json`을 마지막에** 쓴다
 - **manifest가 있는 run만 완료된 run이다.** 읽는 쪽(Spark 워터마크)은 manifest가 없는 run을 건너뛴다. 중간 실패·정리 실패 모두 manifest가 없는 상태로 남는다
-- manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않아 같은 run이면 내용이 같다. `row_count < total_count`면 예산 상한으로 잘린 run
+- manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, page_size, expected_pages, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않는다. 받은 페이지 < `expected_pages`면 예산 상한으로 잘린 run, 페이지를 다 받았는데 `row_count ≠ total_count`면 페이징 드리프트 (5장)
+- **완료된 run은 다시 받지 않는다** (2026.10.29). API는 '지금부터 최근 N분'만 주므로, 같은 run을 나중에 받으면 다른 데이터에 예전 `collected_at`이 붙고 `start`가 원래 원본을 지운다. 원본은 다시 받을 수 없다
+  - manifest가 있으면 호출 없이 성공 (종료 코드 0)
+  - `run_after`가 지금과 `EONJE_FETCH_MAX_LAG_MIN`(기본 = `EONJE_STATUS_PERIOD_MIN`, 그보다 클 수 없음)보다 멀면 호출 없이 건너뜀 (99). 밀린 run, catchup
+  - manifest가 없는 run(중간 실패)만 run 폴더를 비우고 다시 받는다. 다시 수집하고 싶으면 새 run_id
 - 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 
 ### 서빙·정제 (Postgres `eonje` DB, `storage/models.py`)
@@ -344,7 +357,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 | `agg_station_hourly` | `stat_id, dow, hour` | 충전소 단위 (충전기 합산) |
 | `agg_abnormal` | `stat_id, chger_id` | 비정상 상태(1·4·5·9) 시작 시각, 지속 일수 |
 | `api_call_log` | `id` (PK), 인덱스 `called_at` | EvCharger API HTTP 시도 1회 = 1행 (재시도 포함, 일일 한도 계산 기준). `called_at`, `job`, `run_id`(Airflow 원문), `operation`, `page_no`, `attempt`, `params`(JSONB, serviceKey 제외), `http_status`, `result_code`, `total_count`, `elapsed_ms` |
-| `ml_model` | `name, version` | 모델 파일 경로(MinIO), 학습 구간, 정확도, 운영 버전 여부 (9단계) |
+| `ml_model` | `name, version` | 모델 파일 경로(SeaweedFS), 학습 구간, 정확도, 운영 버전 여부 (9단계) |
 | `pred_*` | 대상별 | 매시 배치 추론 결과. API는 이 테이블만 읽음 (9단계) |
 | `ref_code_*` | 코드, 버전 | 상태·충전기타입·지역·시설·기관 코드표 |
 
@@ -352,7 +365,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 ## 7. DAG 구성
 
-Airflow 3, LocalExecutor, TaskFlow `@task.docker`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
+Airflow 3, LocalExecutor, TaskFlow `@task.docker`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id> --run-after <dag_run.run_after>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
 
 Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나만 돈다. 변환은 **워터마크** 방식이다: 자기 run의 원본만이 아니라 아직 처리하지 않은 원본 run을 전부 처리한다. 그래서 변환이 멈췄다 살아나면 자동으로 따라잡고, 수집은 변환 상태와 무관하게 계속된다.
 
@@ -364,13 +377,14 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 5. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 ### `ev_status_10min` (10분)
-1. `check_budget` (C) — 오늘 사용량 조회, 실행 여부·페이지 상한 결정 (XCom으로 상한 전달)
-2. `fetch_delta` (C) — `period=10` 전 페이지, 원본 저장
-3. `dedupe_load_obs` (S) — 중복 제거 후 `obs_status` 적재 (`source=delta`)
-4. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
-5. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
+1. `fetch_delta` (C) — 예산 판단 후 `period=10` 전 페이지, 원본 저장. 예산이 없거나 run이 늦었으면 호출 없이 종료 코드 99 → `skip_on_exit_code=99`로 skipped. 이미 완료된 run은 호출 없이 0 (6장)
+2. `dedupe_load_obs` (S) — 중복 제거 후 `obs_status` 적재 (`source=delta`)
+3. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
+4. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
 
-3~5는 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을 수 있다. 묶을지는 소요 시간을 재 보고 정한다.
+예산 판단을 별도 태스크(`check_budget` → XCom으로 상한 전달)로 두지 않는다 (2026.10.29). 별도 태스크면 판단과 호출 사이가 컨테이너 기동만큼 벌어져 상한이 낡기 쉽다. 호출하는 잡이 시작할 때 직접 판단해 그 구간을 줄이고, 남는 경쟁은 수집 잡 직렬화로 막는다 (5장). 남은 예산은 `fetch_delta` 로그와 `api_call_log`로 본다.
+
+2~4는 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을 수 있다. 묶을지는 소요 시간을 재 보고 정한다.
 
 ### `ev_aggregate_hourly` (매시)
 1. `agg_occupancy` (S) — 지난 구간의 관측·세션에서 증분 집계
@@ -378,10 +392,10 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 3. `quality_metrics` (S) — 결측 구간, 불일치 비율, 미지 코드 수
 
 ### 예측 (9단계, 10장)
-- `ml_train_weekly` — 피처 생성(S) → 학습(`eonje-ml`, `docker_url`=B) → 모델 파일 MinIO 저장, 운영 버전 Postgres 기록
+- `ml_train_weekly` — 피처 생성(S) → 학습(`eonje-ml`, `docker_url`=B) → 모델 파일 SeaweedFS 저장, 운영 버전 Postgres 기록
 - `ml_infer_hourly` — 운영 버전 모델로 배치 추론 → 예측 테이블
 
-재실행 규칙: 원본은 `run=<ts>` 디렉터리 덮어쓰기. `obs_status`는 키 충돌 시 무시. 전이·세션은 upsert. 집계는 구간 단위 삭제 후 재계산. 백필은 Airflow 없이 `eonje.cli`를 직접 호출해도 같은 결과.
+재실행 규칙: 원본은 완료된 run을 다시 받지 않고, 중간 실패한 run만 run 폴더를 비우고 다시 받는다 (6장). `obs_status`는 키 충돌 시 무시. 전이·세션은 upsert. 집계는 구간 단위 삭제 후 재계산. 변환·집계의 백필은 Airflow 없이 `eonje.cli`를 직접 호출해도 같은 결과. 수집은 지난 구간을 받을 수 없어 백필이 없다.
 
 ## 8. 인프라·운영
 
@@ -391,13 +405,13 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 | 노드 | 역할 | 올라가는 것 |
 |---|---|---|
-| A (상시) | 수집·저장·지휘·서빙 | Airflow, Postgres, MinIO, 수집 태스크, eonje-api, cloudflared, **Spark master(고정)**, Spark worker(B 전까지), Spark 드라이버(job마다 뜨는 태스크 컨테이너) |
-| B (추가 시) | 계산·감시·보관 | **Spark worker**, **모니터링**(Prometheus·Grafana·Loki·알림), **로컬 백업**(MinIO 미러, `pg_dump`), **모델 학습**(Spark가 아닌 무거운 태스크) |
+| A (상시) | 수집·저장·지휘·서빙 | Airflow, Postgres, SeaweedFS, 수집 태스크, eonje-api, cloudflared, **Spark master(고정)**, Spark worker(B 전까지), Spark 드라이버(job마다 뜨는 태스크 컨테이너) |
+| B (추가 시) | 계산·감시·보관 | **Spark worker**, **모니터링**(Prometheus·Grafana·Loki·알림), **로컬 백업**(원본 버킷 동기화, `pg_dump`), **모델 학습**(Spark가 아닌 무거운 태스크) |
 
 노드 A 사양: AMD Ryzen 3 4300U (Zen 2, 4코어 4스레드), LPDDR4 16GB(온보드, 증설 불가), M.2 SSD 512GB, 유선 1GbE. Ubuntu Server 26.04 LTS, Docker(로그 로테이션 10m×3), 스왑 8GB(swappiness 10), SSH 키 로그인만, 공유기 DHCP 예약으로 고정 내부 IP. B는 필요해지는 시점의 가격으로 고른다 (로컬 백업을 받으니 SSD 512GB 이상).
 
 메모리 배분 (16GB):
-- A (B 전): OS·Docker 1~1.5, Airflow 2~2.5, Postgres 1.5~2, MinIO·API·cloudflared ~1, collector ~0.3, Spark master 0.5 + worker 데몬 0.7 + executor 3~4 + 드라이버 1 → 피크 12.5~14GB. 메모리는 증설할 수 없으므로 부족하면 B 추가로 해결
+- A (B 전): OS·Docker 1~1.5, Airflow 2~2.5, Postgres 1.5~2, SeaweedFS·API·cloudflared ~1, collector ~0.3, Spark master 0.5 + worker 데몬 0.7 + executor 3~4 + 드라이버 1 → 피크 12.5~14GB. 메모리는 증설할 수 없으므로 부족하면 B 추가로 해결
 - B: OS·Docker 1, 모니터링 1.5~2, worker 데몬 ~1, 나머지를 executor에. 모델 학습은 Spark 큰 배치와 시간대를 겹치지 않게 스케줄
 
 **B 추가 신호** (처음부터 Spark 태스크 소요 시간·메모리를 기록한다): 10분 변환 소요 시간이 계속 늘어 주기를 위협, Spark pool 대기가 잦음, A의 메모리·스왑 사용이 상시 높음. 구현 단계가 아니라 측정으로 결정한다.
@@ -410,7 +424,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - master·worker·드라이버 모두 `network_mode: host`, `spark.driver.host` = A의 랜 IP. 앱마다 `spark.cores.max`·`spark.executor.memory`로 자원을 나눈다
 - A 단독일 때: worker 코어 2~3·메모리 4GB 정도, Spark 앱은 pool 슬롯 1. Spark master UI 포트는 8080에서 바꾼다(Airflow api-server와 충돌), worker UI 포트도 조정
 - B 추가 시: B에 worker를 `spark://<A>:7077`로 붙인다. A의 `.env`·DAG·코드는 바뀌지 않는다. 이후 A의 worker를 줄이거나 내린다(미결)
-- 노드 간 통신 (B 추가 후): B → A는 MinIO 9000, Postgres 5432, Spark master 7077, 모니터링 수집 대상. A → B는 Docker 데몬(학습 태스크, SSH 방식 권장), 드라이버 ↔ executor 포트. 전부 집 내부망·Tailscale에서만, 필요하면 `spark.authenticate`
+- 노드 간 통신 (B 추가 후): B → A는 SeaweedFS S3 8333, Postgres 5432, Spark master 7077, 모니터링 수집 대상. A → B는 Docker 데몬(학습 태스크, SSH 방식 권장), 드라이버 ↔ executor 포트. 전부 집 내부망·Tailscale에서만, 필요하면 `spark.authenticate`
 
 ### 8.3 배포 (CI/CD)
 
@@ -420,7 +434,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 ~/eonje/
   compose.yaml   # CD가 배포 때마다 덮어씀
   .env           # 서비스 키·비밀번호. 서버에서 직접 관리
-+ docker 볼륨     # Postgres·MinIO 데이터
++ docker 볼륨     # Postgres·SeaweedFS 데이터
 ```
 
 - 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
@@ -441,13 +455,13 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 - 공유기 포트포워딩 없음. 외부에서 들어오는 포트는 0개
 - 공개: Cloudflare Tunnel. `cloudflared`가 Cloudflare로 나가는 연결을 열어 두고, 요청은 그 터널로 `eonje-api`에 전달. DNS·HTTPS·기본 DDoS 방어·정적 캐시는 Cloudflare(무료 플랜). 도메인은 서비스 공개(8단계) 때 구입
-- 관리: Tailscale. SSH, Airflow·Spark·MinIO 콘솔·Grafana는 tailnet 안에서만. 서버 노드는 키 만료를 끈다
+- 관리: Tailscale. SSH, Airflow·Spark·SeaweedFS UI·Grafana는 tailnet 안에서만. 서버 노드는 키 만료를 끈다
 - SSH: 키 로그인만 (비밀번호·root 로그인 차단)
 
 ### 8.5 백업·모니터링·복구
 
 - 원본은 가공 없이 영구 보존. 어떤 정제 결과도 원본에서 재생성 가능
-- 로컬 백업 (B): A의 MinIO를 B로 `mc mirror`, `pg_dump`를 B에 일 단위 저장 — 빠른 복구용
+- 로컬 백업 (B): A의 원본 버킷을 B로 동기화(`weed filer.sync` 또는 rclone), `pg_dump`를 B에 일 단위 저장 — 빠른 복구용
 - 오프사이트 백업: 원본 Parquet·`pg_dump`를 R2 또는 B2로 — 재해 대비. 노드가 A 하나뿐인 동안에도 오프사이트는 처음부터
 - 복구 절차를 문서화하고 한 번은 실제로 연습한다
 - 모니터링 (B): Prometheus(A·B 노드, Postgres·Airflow·Spark 지표) + Grafana + Loki(컨테이너 로그). 수집 중단·한도 근접·결측·디스크·메모리 알림을 B에서 발송 → A가 죽어도 알림이 나간다. B 전에는 텔레그램 알림만
@@ -485,7 +499,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 
 - 대상: 남은 충전 시간(최우선, `nowTsdt`로 진행 중 세션의 경과 시간을 안다), 도착 시점 빈자리 확률, 출발 시점 추천, 혼잡 예보 등 (요구사항 FR-40~49)
 - 모델: 표 데이터 모델 — LightGBM, 생존분석(세션 종료 시점). 피처는 요일·시간대·충전기 타입·출력·시설 유형·최근 점유·진행 중 세션 경과 시간 등
-- 학습: 주 1회. 피처는 Spark(MinIO·Postgres)로 만들고, 학습은 `eonje-ml` 이미지로 B에서 (`docker_url`). 모델 파일은 MinIO에 버전을 붙여 저장하고, 운영 버전은 Postgres에 기록
+- 학습: 주 1회. 피처는 Spark(SeaweedFS·Postgres)로 만들고, 학습은 `eonje-ml` 이미지로 B에서 (`docker_url`). 모델 파일은 SeaweedFS에 버전을 붙여 저장하고, 운영 버전은 Postgres에 기록
 - 추론: 매시 배치 추론 → 예측 테이블. API는 테이블만 읽는다 (요청 시점 추론 없음)
 - 정확도: 주 단위로 실측과 비교해 기록·공개
 - 자연어 요약: 외부 LLM API로 문장만 생성해 저장. 자체 호스팅 안 함
@@ -495,7 +509,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 | 단계 | 내용 | 엔진 | 노드 |
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
-| 2 | 수집기 배포: API 클라이언트, 원본 저장(MinIO), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `check_budget`·`fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
+| 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
 | 3 | `ev_master_daily` + 차원 테이블과 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환). 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
@@ -508,6 +522,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 
 - `period=1`이 0건인 이유 (상류 반영 주기). 다른 시각에 재확인
 - 저녁 피크의 `period=10` totalCount (3페이지 넘는지)
+- 수집 잡 직렬화 방식: Airflow pool만으로 충분한지, advisory lock까지 둘지 (3단계 `fetch_master` 때, 5장)
 - `getChargerStatus`의 `statId` 필터 동작 (알림용 집중 폴링 전제)
 - 운영기관별 `statUpdDt` 의미 분류 — 데이터 쌓이면 기관별 갱신 간격 분포로 판별
 - 운영계정 전환 시점과 요건 (서비스 URL 필요 여부)
@@ -520,7 +535,6 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - B 추가 후 A의 Spark worker 유지(2워커) 여부
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
 - `ev_status_10min`의 Spark 태스크를 한 앱으로 묶을지 (소요 시간 측정 후)
-- 원본 run을 재수집하면 이미 변환된 run의 내용이 바뀔 수 있다. 워터마크는 run_key만이 아니라 manifest 기준(collected_at, 내용 해시 등)으로 잡을지 — 4단계 변환 설계 때
 
 ## 13. 코드표 (설계에 쓰는 것만)
 

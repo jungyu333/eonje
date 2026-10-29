@@ -1,0 +1,4 @@
+OK = 0
+FAILED = 1
+USAGE = 2
+SKIPPED = 99

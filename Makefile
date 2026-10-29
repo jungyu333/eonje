@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -41,8 +41,9 @@ check: lint typecheck test   ## CI와 동일한 전체 검사
 build:           ## eonje 이미지 빌드
 	docker build -f docker/tasks/collector/Dockerfile -t eonje-collector:$(TAG) .
 
-run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x
-	uv run python -m eonje.cli $(JOB) --run-id $(RUN_ID)
+run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
+	$(if $(and $(JOB),$(RUN_ID),$(RUN_AFTER)),,$(error usage: make run JOB=<job> RUN_ID=<id> RUN_AFTER=<ISO 8601 with offset like 2026-10-28T01:10:00+00:00>))
+	uv run python -m eonje.cli $(JOB) --run-id $(RUN_ID) --run-after $(RUN_AFTER)
 
 up:              ## 로컬 인프라 시작. 일부만: make up SERVICES=postgres
 	$(COMPOSE) up -d --wait $(SERVICES)
@@ -61,3 +62,6 @@ migration:       ## 새 리비전 생성. 예: make migration MSG="add dim table
 
 migration-check: ## models.py와 마이그레이션이 일치하는지 (DB 필요)
 	uv run alembic check
+
+buckets:         ## 원본 버킷 생성 (이미 있으면 성공으로 봄)
+	$(COMPOSE) exec -T seaweedfs sh -c 'b="$${EONJE_RAW_BUCKET:-eonje-raw}"; out=$$(echo "s3.bucket.create -name $$b" | weed shell 2>&1); echo "$$out"; case "$$out" in *"created bucket"*|*"already exists"*) exit 0 ;; *) exit 1 ;; esac'

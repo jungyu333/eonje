@@ -1,4 +1,5 @@
 import dataclasses
+import re
 from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
@@ -10,10 +11,12 @@ from eonje.storage.raw_paths import (
     manifest_path,
     page_path,
     partition_date,
+    run_key_from_run_id,
     run_prefix,
 )
 
 BUCKET = "eonje-raw"
+DIGEST_SUFFIX = r"-[0-9a-f]{8}"
 
 
 @pytest.fixture
@@ -220,3 +223,133 @@ def test_partition_date_rejects_a_naive_time() -> None:
     # WHEN / THEN it is rejected instead of guessing KST or UTC
     with pytest.raises(ValueError, match="timezone-aware"):
         partition_date(datetime(2026, 10, 26, 0, 10, 0))
+
+
+# --- run_key_from_run_id --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("run_id", "expected"),
+    [
+        ("scheduled__2026-10-26T01:10:00+00:00", "scheduled__2026-10-26T01-10-00-00-00"),
+        ("manual__2026-10-26T01:10:00.123456+00:00", "manual__2026-10-26T01-10-00.123456-00-00"),
+        ("backfill__x/y z", "backfill__x-y-z"),
+        ("a\\b", "a-b"),
+        ("id언제", "id--"),
+    ],
+)
+def test_run_key_from_run_id_replaces_each_unsafe_char_with_a_hyphen(
+    run_id: str, expected: str
+) -> None:
+    # GIVEN an Airflow-style run_id containing ':', '+', '/', space, backslash or non-ASCII
+    # WHEN it is converted to a run key
+    key = run_key_from_run_id(run_id)
+    # THEN every char outside [0-9A-Za-z_.-] becomes '-', '.', '_', '-' are kept,
+    # and an 8-hex-char digest suffix marks that the run_id was changed
+    assert re.fullmatch(re.escape(expected) + DIGEST_SUFFIX, key)
+
+
+@pytest.mark.parametrize(
+    ("run_id", "expected"),
+    [
+        ("-leading", "r-leading"),
+        ("_x", "r_x"),
+        (".x", "r.x"),
+        ("..", "r.."),
+        (":x", "r-x"),
+        ("언제", "r--"),
+    ],
+)
+def test_run_key_from_run_id_prefixes_r_when_the_key_would_not_start_alphanumeric(
+    run_id: str, expected: str
+) -> None:
+    # GIVEN a run_id whose sanitized form starts with '-', '_' or '.'
+    # WHEN it is converted to a run key
+    key = run_key_from_run_id(run_id)
+    # THEN 'r' is prepended so the key starts with an alphanumeric, plus a digest suffix
+    assert re.fullmatch(re.escape(expected) + DIGEST_SUFFIX, key)
+
+
+def test_run_key_from_run_id_rejects_an_empty_run_id() -> None:
+    # GIVEN an empty run_id
+    # WHEN / THEN it raises instead of producing an empty run= directory
+    with pytest.raises(ValueError, match="run_id must not be empty"):
+        run_key_from_run_id("")
+
+
+@pytest.mark.parametrize("run_id", ["20261026T001000Z", "manual__x", "a.b-c_d", "0", "Run-1.2"])
+def test_run_key_from_run_id_keeps_an_already_safe_run_id_unchanged(run_id: str) -> None:
+    # GIVEN a run_id that is already a valid run key
+    # WHEN it is converted to a run key
+    key = run_key_from_run_id(run_id)
+    # THEN it is returned as is
+    assert key == run_id
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "scheduled__2026-10-26T01:10:00+00:00",
+        "manual__2026-10-26T01:10:00.123456+00:00",
+        "backfill__x/y z",
+        "-leading",
+        "_x",
+        ".x",
+        "..",
+        "../escape",
+        "run=1",
+        "k\n",
+        "a\\b",
+        "언제",
+        "20261026T001000Z",
+    ],
+)
+def test_run_key_from_run_id_always_yields_a_key_accepted_by_raw_run(run_id: str) -> None:
+    # GIVEN any non-empty run_id, including ones RawRun rejects directly
+    # WHEN it is converted and used to build a RawRun
+    run = RawRun(
+        dataset=Dataset.CHARGER_STATUS, dt=date(2026, 10, 26), run_key=run_key_from_run_id(run_id)
+    )
+    # THEN construction succeeds and the run prefix has no extra path segment
+    assert run_prefix(BUCKET, run).count("/") == 3
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ["scheduled__2026-10-26T01:10:00+00:00", "-leading", "backfill__x/y z", "20261026T001000Z"],
+)
+def test_run_key_from_run_id_is_deterministic(run_id: str) -> None:
+    # GIVEN the same run_id (a rerun of the same Airflow run)
+    # WHEN it is converted twice
+    # THEN both keys are identical, so the rerun overwrites the same run= directory
+    assert run_key_from_run_id(run_id) == run_key_from_run_id(run_id)
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    ["scheduled__2026-10-26T01:10:00+00:00", "-leading", "_x", ".x", "backfill__x/y z"],
+)
+def test_run_key_from_run_id_is_idempotent(run_id: str) -> None:
+    # GIVEN a run key already produced from a run_id
+    key = run_key_from_run_id(run_id)
+    # WHEN it is converted again
+    # THEN it is unchanged
+    assert run_key_from_run_id(key) == key
+
+
+def test_run_key_from_run_id_keeps_ids_differing_only_in_unsafe_chars_distinct() -> None:
+    # GIVEN run_ids that sanitize to the same text "a-b"
+    run_ids = ["a:b", "a/b", "a-b"]
+    # WHEN each is converted to a run key
+    keys = [run_key_from_run_id(run_id) for run_id in run_ids]
+    # THEN all keys differ, so the runs never share a run= directory
+    assert len(set(keys)) == len(run_ids)
+
+
+def test_run_key_from_run_id_keeps_a_prefixed_id_distinct_from_its_literal_form() -> None:
+    # GIVEN "-x" (gets the 'r' prefix) and "r-x" (already safe)
+    # WHEN both are converted to run keys
+    prefixed = run_key_from_run_id("-x")
+    literal = run_key_from_run_id("r-x")
+    # THEN they differ, so the 'r' prefix cannot collide with a real run_id
+    assert prefixed != literal
