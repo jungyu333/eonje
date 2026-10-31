@@ -257,7 +257,7 @@ flowchart TB
 | 운영 노드 | 집 미니PC (A 상시, B는 부족 신호 시 추가) | 8.1 |
 | 테스트 | pytest, 실제 응답 fixture, 로컬 SparkSession | `transform/`은 fixture로 커버. DB 테스트는 `db` 마커 + Actions `services:` Postgres |
 | 품질 | ruff (lint·format), mypy strict, pre-commit | pre-commit 훅: ruff(프로젝트 venv 버전), ruff-format, EOF·공백·YAML·TOML 검사, 대용량 파일·개인키 차단. mypy는 CI |
-| CI | GitHub Actions | PR: ruff + mypy + pytest + 이미지 빌드(푸시 없음) |
+| CI | GitHub Actions | PR: ruff + mypy + pytest, collector 이미지 스모크, Airflow 이미지 + DAG 무결성 검사, DB 테스트. main: 전부 통과하면 이미지를 GHCR에 `<sha>`로 푸시 |
 | CD | GitHub Actions + Tailscale + SSH | main: 이미지 GHCR 푸시 → 노드에 compose 배포 → 헬스체크 → `deploy` ref 이동 (8.3) |
 | 알림·관측 | A 단독: 텔레그램 봇. B 추가 후: Prometheus + Grafana + Loki (B에서 실행) | A가 죽어도 B에서 알림 발송 |
 | 백업 | 로컬: B로 버킷 동기화(`weed filer.sync` 또는 rclone)·`pg_dump`. 오프사이트: R2 또는 B2 | 8.5 |
@@ -509,9 +509,10 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 ```
 
 - 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
-- **CI** (PR): ruff, mypy, pytest, 이미지 빌드(푸시 없음)
+- **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres)
+- **이미지 푸시** (main, CI 전부 통과 후): `ghcr.io/jungyu333/eonje-collector`·`eonje-airflow`를 `<sha>`와 `main` 태그로. 배포는 항상 sha로 고른다. 워크플로 기본 권한은 `contents: read`, 푸시 잡만 `packages: write`. 패키지는 처음 푸시 후 GitHub에서 한 번 public으로 바꾼다(서버가 인증 없이 pull)
 - **CD** (main 머지):
-  1. 이미지 빌드 → GHCR에 `<git-sha>` 태그로 푸시
+  1. CI의 이미지 푸시가 끝난 sha를 배포한다
   2. deploy 잡이 Tailscale에 임시 노드(`tag:ci`)로 접속. ACL로 노드의 SSH 포트에만 허용
   3. `scp`로 compose 파일 복사 → `ssh <노드> "EONJE_IMAGE_TAG=<sha> docker compose pull"`
   4. 스키마 적용: Postgres는 Alembic `upgrade head`(collector 이미지, 마이그레이션 포함), Iceberg는 `ensure-iceberg-tables`(spark 이미지, 3단계부터). 둘 다 멱등이라 매 배포마다 돌린다. 실패하면 배포를 멈추고 `deploy` ref를 옮기지 않는다 → 새 DAG가 없는 테이블을 부르지 않는다

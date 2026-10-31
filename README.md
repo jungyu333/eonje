@@ -94,6 +94,7 @@ DOCKER_GID=0   # Docker Desktop. Linux는 getent group docker | cut -d: -f3
 make build        # eonje-collector:dev, eonje-airflow:dev
 make up
 make dags-check   # DAG import 오류 확인. "No data found"면 정상
+make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있으면 됨, make up 불필요)
 ```
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
