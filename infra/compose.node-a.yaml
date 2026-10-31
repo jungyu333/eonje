@@ -45,6 +45,16 @@ services:
       timeout: 3s
       retries: 20
 
+  migrate:
+    image: eonje-collector:${EONJE_IMAGE_TAG:-dev}
+    profiles: [ "tools" ]
+    entrypoint: [ "alembic", "upgrade", "head" ]
+    environment:
+      EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD:?set EONJE_DB_PASSWORD in .env}@postgres:5432/eonje
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 configs:
   pg_init:
     file: ./postgres/init.sh
