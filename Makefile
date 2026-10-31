@@ -76,8 +76,9 @@ airflow-recreate: ## .env 변경(비밀번호 등)을 Airflow api-server에 반�
 dags-check:      ## Airflow 컨테이너에서 DAG import 오류 확인 (make up 필요)
 	$(COMPOSE) exec airflow-dag-processor airflow dags list-import-errors
 
+# MSYS_NO_PATHCONV: Windows Git Bash가 /opt/... 인자를 C:/Program Files/Git/opt/...로 바꾸지 않게 (Linux에선 무시됨)
 dags-verify:     ## Airflow 이미지로 DAG 무결성 검사 (CI와 같음, DB 불필요). make build 먼저
-	docker run --rm -v "$(CURDIR)/dags:/opt/airflow/dags:ro" \
+	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR)/dags:/opt/airflow/dags:ro" \
 		-v "$(CURDIR)/docker/airflow/check_dags.py:/opt/airflow/check_dags.py:ro" \
 		eonje-airflow:$(TAG) python /opt/airflow/check_dags.py /opt/airflow/dags
 
