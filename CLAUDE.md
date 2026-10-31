@@ -46,7 +46,7 @@ docs/         # design.md, requirements.md
   models). Iceberg: `storage/iceberg.py`, applied by an idempotent job (`CREATE TABLE IF NOT EXISTS`, add missing
   columns) — never Alembic. Alembic ignores the `iceberg` catalog schema.
 - **Bulk loads never use `session.add` per row.** Postgres: Spark writes a JDBC staging table, then
-  `INSERT ... ON CONFLICT`. Iceberg: `MERGE INTO` for every keyed table (`WHEN NOT MATCHED INSERT` for
+  `INSERT ... ON CONFLICT`. Iceberg: `MERGE INTO` for every keyed table except small static ones rewritten whole (`dim_date`) (`WHEN NOT MATCHED INSERT` for
   ignore-on-conflict) — never plain `append`, which duplicates rows on rerun because Iceberg has no unique constraints.
 - **Raw responses are stored as received** — all columns as strings, unknown fields kept. Type conversion happens in
   `transform/`.
@@ -68,7 +68,7 @@ docs/         # design.md, requirements.md
   then updates `ops.charger_state` and its watermark in one Postgres transaction. Only that task writes
   `charger_state`, under a Postgres advisory lock. Never the reverse: a failed
   Iceberg commit after a state update loses transitions for good. `charger_state` is a derived cache rebuildable from
-  `core.evt_transition`.
+  `core.evt_transition` plus `stg.obs_status` (a charger's first observation sets state without a transition).
 - `statUpdDt` is **not** a transition time (operator-dependent heartbeat). Transitions are derived by comparing against
   `charger_state`.
 - All timestamps are timezone-aware. Naive datetimes are rejected at the storage boundary; stored values are UTC.

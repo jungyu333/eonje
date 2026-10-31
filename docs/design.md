@@ -63,7 +63,7 @@ DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색�
 | 원본 (raw) | 응답을 받은 그대로 보존. 전 컬럼 문자열. 재처리의 유일한 출발점 | 수정·삭제 |
 | 정제 (transform) | 타입 변환, 중복 제거, 차원 SCD2, 전이 계산, 세션 복원, 보정. Spark | API 호출, 외부 I/O (Spark DataFrame in → DataFrame out) |
 | DW (`stg`·`core`, Iceberg) | 정제 관측, 팩트(전이·세션), 디멘션(SCD2) 보관. 추가 위주이고, 기존 행을 바꾸는 건 세션 종료와 디멘션 버전 닫기뿐. 원본에서 언제든 다시 만든다 | 서빙 조회 (API는 마트만 읽음), 잦은 행 갱신 |
-| 집계 (aggregate) | 요일×시간대 점유, 비정상 지속, 품질 지표. `core`에서 증분. Spark | 원본 접근 |
+| 집계 (aggregate) | 요일×시간대 점유, 비정상 지속, 품질 지표. `core`(전이·세션·디멘션)와 `stg.obs_status`(관측, 결측 판정)에서 증분. Spark | 원본 접근 |
 | 마트·운영 (`mart`·`ops`, Postgres) | API용 집계, 현재 상태(`charger_state`), 호출 기록, 품질 지표 | 이력 보관 (이력은 DW) |
 | 예측 (ml) | 피처 생성(Spark), 학습(LightGBM 등), 배치 추론 → 예측 테이블 | 서빙 시점 추론 |
 | 서빙 (serve) | 집계·예측 테이블 읽기 전용 API | 쓰기, 집계 계산 |
@@ -215,7 +215,7 @@ flowchart TB
 
 [1일 1회]   Iceberg 유지보수 (별도 DAG): 작은 파일 합치기, 오래된 스냅샷·고아 파일 정리
 
-[매시]      core 증분 → mart.agg_occupancy_hourly, agg_station_hourly
+[매시]      변환 워터마크까지의 core·stg.obs_status → mart.agg_occupancy_hourly, agg_station_hourly
             → mart.agg_abnormal, ops.quality_metrics
 ```
 
@@ -369,12 +369,12 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 | 테이블 | 한 행 (grain) | 키 | 쓰기 방식 | 파티션 | 주요 컬럼 |
 |---|---|---|---|---|---|
-| `stg.obs_status` | 충전기 1대가 한 run에서 관측된 1회 (`observed_at` = run의 `collected_at`) | `stat_id, charger_id, observed_at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 적재 전 run 안 중복(페이징 드리프트)은 키당 하나로 줄이고, 고르는 기준은 결정적이어야 한다: `stat_upd_dt`가 늦은 행 → `page_no`가 큰 행(나중에 받은 페이지) → 그래도 같으면 나머지 컬럼 값의 사전순. 원본에서 다시 만들어도 같은 행이 남는다. run이 달라 같은 보고가 다시 보이면 별개의 관측으로 남긴다 | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
-| `core.evt_transition` | 충전기 1대의 상태 변화 1회 | `stat_id, charger_id, at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
+| `stg.obs_status` | 충전기 1대가 한 run에서 관측된 1회 (`observed_at` = run의 `collected_at`) | `stat_id, charger_id, run_key` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 적재 전 run 안 중복(페이징 드리프트)은 키당 하나로 줄이고, 고르는 기준은 결정적이어야 한다: `stat_upd_dt`가 늦은 행 → `page_no`가 큰 행(나중에 받은 페이지) → 그래도 같으면 나머지 컬럼 값의 사전순. 원본에서 다시 만들어도 같은 행이 남는다. run이 달라 같은 보고가 다시 보이면 별개의 관측으로 남긴다. 키에 `observed_at`이 아니라 `run_key`를 쓰는 이유: `collected_at`은 Airflow 논리 시각(`run_after`)이라 delta run과 full run이 같은 시각을 가질 수 있다 | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
+| `core.evt_transition` | 충전기 1대의 상태 변화 1회 (그것을 발견한 run 하나에 속함) | `stat_id, charger_id, at, run_key` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
 | `core.fact_session` | 충전 세션 1회 | `stat_id, charger_id, started_at` | `MERGE` (진행 중 세션이 끝나면 갱신) | `started_date` | `ended_at`, `duration_min`, `source`(last_ts/now_ts) |
 | `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (`MERGE`: 바뀐 행은 현재 버전을 닫고 새 버전 추가) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한, `valid_to`, `is_current` |
 | `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 (`MERGE`) | 없음 | 타입·출력·방식·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current` |
-| `core.dim_date` | 날짜 1일 | `date` | 정적 (공휴일 갱신 시 재생성) | 없음 | 요일, 주말, 공휴일 |
+| `core.dim_date` | 날짜 1일 | `date` | 정적. 공휴일이 바뀌면 테이블 전체 덮어쓰기 (작은 정적 테이블이라 `MERGE` 규칙의 예외) | 없음 | 요일, 주말, 공휴일 |
 
 - 팩트는 **추가만** 한다. 고칠 일은 새 행으로 남긴다 (보정 전이). 예외는 세션 종료 갱신 하나
 - **키가 있는 테이블은 단순 `append`로 쓰지 않는다.** Iceberg에는 고유 제약이 없어 재실행하면 중복 행이 생긴다. 키 충돌 무시는 `MERGE ... WHEN NOT MATCHED INSERT`로 구현한다. 단순 `append`는 키가 없는 테이블에만
@@ -412,7 +412,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 ### `ev_master_daily` (1일 1회)
 1. `fetch_pages` (C) — 53페이지 순회, 원본 저장. 페이지 단위 재시도. 호출 로그 기록
-2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다
+2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다. 변환 흐름과 달리 지연 여유를 두지 않고 방금 받은 run을 바로 처리한다. 그 결과 워터마크보다 늦게 완료된 옛 full run은 디멘션에 반영하지 않고 버린다 (다음 날 full run이 같은 정보를 다시 준다)
 3. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 전체 상태의 관측 적재와 보정(`charger_state`와 비교해 `source=reconciled` 전이)은 이 DAG에서 하지 않는다. full run도 원본 run이므로 변환 흐름(`ev_transform_10min`)이 delta run과 함께 **수집 시각 순서대로** 처리한다. 따로 돌리면 변환이 밀려 있을 때 시각 T의 전체 스냅샷이 T보다 오래된 `charger_state`와 비교되고, 그 뒤 처리되는 과거 delta가 더 새 상태와 비교돼 가짜·역방향 전이가 생긴다.
@@ -423,6 +423,8 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 예산 판단을 별도 태스크(`check_budget` → XCom으로 상한 전달)로 두지 않는다 (2026.10.29). 별도 태스크면 판단과 호출 사이가 컨테이너 기동만큼 벌어져 상한이 낡기 쉽다. 호출하는 잡이 시작할 때 직접 판단해 그 구간을 줄이고, 남는 경쟁은 수집 잡 직렬화로 막는다 (5장). 남은 예산은 `fetch_delta` 로그와 `api_call_log`로 본다.
 
 2단계에서는 이 태스크 하나다. 수집 DAG의 태스크는 쪼개지 않는다: 페이지별 태스크는 페이지 사이 간격이 컨테이너 기동만큼 벌어져 드리프트가 커지고, 재시도는 클라이언트(페이지 단위)와 멱등 재실행으로 충분하다. 수집 후 검증·품질 지표 태스크는 4단계에서 뒤에 붙인다.
+
+> **7장의 아래 세 DAG(`ev_transform_10min`, `ev_aggregate_hourly`, `lake_maintenance_daily`)는 초안이다.** 방향(워터마크, 쓰기 순서, 테이블 역할)만 정하고, 세부 규칙은 4단계 이후 구현과 테스트로 확정한다.
 
 ### `ev_transform_10min` (4단계, 분리 후보)
 1. `dedupe_load_obs` (S) — 미처리 원본 run(delta·full)을 타입 변환, run 안 중복 제거 후 `stg.obs_status` 적재 (`source=delta|full`)
@@ -445,7 +447,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 수집 DAG 뒤에 붙이지 않고 별도 DAG로 두는 안이 유력하다. 변환은 워터마크라 이번 수집이 skipped여도 밀린 run을 처리해야 하는데, 같은 DAG면 skip이 뒤로 전파된다(`trigger_rule="none_failed"`로 우회해야 함). 별도 DAG면 수집과 변환이 서로 막지 않는다. 실행은 `fetch_delta`가 원본을 쓴 뒤의 Airflow Asset 또는 자체 10분 스케줄. 1~3을 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을지는 소요 시간을 재 보고 정한다.
 
 ### `ev_aggregate_hourly` (매시)
-1. `agg_occupancy` (S) — `core`의 지난 구간 관측·세션 + 디멘션 → `mart.agg_occupancy_hourly`·`agg_station_hourly` (구간 삭제 후 재계산)
+1. `agg_occupancy` (S) — `stg.obs_status`(관측·결측 판정)와 `core`(세션·전이) + 디멘션 → `mart.agg_occupancy_hourly`·`agg_station_hourly` (구간 삭제 후 재계산). **구간의 끝은 변환 워터마크(`derive_transitions`·`upsert_sessions` 중 이른 쪽)까지**이고, 지난 실행 이후 워터마크가 지나간 구간만 다시 계산한다. 아직 변환되지 않은 최근 구간을 '모름'으로 확정하지 않기 위해서다
 2. `agg_abnormal` (S) — `mart.agg_abnormal` 갱신
 3. `quality_metrics` (S) — 결측 구간, 불일치 비율, 미지 코드 수, 페이징 드리프트 → `ops.quality_metrics`
 

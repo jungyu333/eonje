@@ -41,7 +41,7 @@ Review the current branch against `main` following the project's boundary and da
 - [ ] `statUpdDt` is not used as a transition timestamp
 - [ ] Unknown status codes are stored, not dropped or raised
 - [ ] Missing observation windows are excluded from occupancy denominators
-- [ ] `stg.obs_status` keeps one row per `(stat_id, charger_id, observed_at)`: duplicates inside one run are reduced
+- [ ] `stg.obs_status` keeps one row per `(stat_id, charger_id, run_key)`: duplicates inside one run are reduced
       deterministically (latest `stat_upd_dt`, then tie-breakers in design.md 6); the same report seen in another run is
       a separate observation
 
