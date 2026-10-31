@@ -120,7 +120,9 @@ eonje/
   dags/                   # 얇은 DAG. @task.docker로 eonje.cli 호출만. Airflow가 GitDagBundle로 직접 가져감 (서버에 마운트 안 함)
     ev_master_daily.py
     ev_status_10min.py
+    ev_transform_10min.py # 4단계 (분리 후보, 7장)
     ev_aggregate_hourly.py
+    lake_maintenance_daily.py
   docker/
     tasks/collector/Dockerfile
     tasks/spark/Dockerfile
@@ -406,31 +408,42 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 ### `ev_master_daily` (1일 1회)
 1. `fetch_pages` (C) — 53페이지 순회, 원본 저장. 페이지 단위 재시도. 호출 로그 기록
-2. `load_dims` (S) — SCD2 갱신 (변경된 행만 새 버전)
-3. `reconcile_state` (S) — 전체 `stat`를 `charger_state`와 비교, 불일치는 보정 전이 생성
-4. `load_obs` (S) — 전체 상태를 `obs_status`에 `source=full`로 적재
+2. `load_dims` (S) — `core.dim_station`·`dim_charger` SCD2 갱신 (변경된 행만 새 버전)
+3. `reconcile_state` (S) — 전체 `stat`를 `ops.charger_state`와 비교, 불일치는 `core.evt_transition`에 보정 전이(`source=reconciled`)
+4. `load_obs` (S) — 전체 상태를 `stg.obs_status`에 `source=full`로 적재
 5. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 ### `ev_status_10min` (10분)
 1. `fetch_delta` (C) — 예산 판단 후 `period=10` 전 페이지, 원본 저장. 예산이 없거나 run이 늦었으면 호출 없이 종료 코드 99 → `skip_on_exit_code=99`로 skipped. 이미 완료된 run은 호출 없이 0 (6장)
-2. `dedupe_load_obs` (S) — 중복 제거 후 `obs_status` 적재 (`source=delta`)
-3. `derive_transitions` (S) — `charger_state`와 비교해 `evt_transition` 생성, `charger_state` 갱신
-4. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `fact_session` upsert
 
 예산 판단을 별도 태스크(`check_budget` → XCom으로 상한 전달)로 두지 않는다 (2026.10.29). 별도 태스크면 판단과 호출 사이가 컨테이너 기동만큼 벌어져 상한이 낡기 쉽다. 호출하는 잡이 시작할 때 직접 판단해 그 구간을 줄이고, 남는 경쟁은 수집 잡 직렬화로 막는다 (5장). 남은 예산은 `fetch_delta` 로그와 `api_call_log`로 본다.
 
-2~4는 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을 수 있다. 묶을지는 소요 시간을 재 보고 정한다.
+2단계에서는 이 태스크 하나다. 수집 DAG의 태스크는 쪼개지 않는다: 페이지별 태스크는 페이지 사이 간격이 컨테이너 기동만큼 벌어져 드리프트가 커지고, 재시도는 클라이언트(페이지 단위)와 멱등 재실행으로 충분하다. 수집 후 검증·품질 지표 태스크는 4단계에서 뒤에 붙인다.
+
+### `ev_transform_10min` (4단계, 분리 후보)
+1. `dedupe_load_obs` (S) — 중복 제거 후 `stg.obs_status` 적재 (`source=delta`)
+2. `derive_transitions` (S) — `ops.charger_state`와 비교해 `core.evt_transition` 추가, `charger_state` 갱신
+3. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `core.fact_session` `MERGE`
+
+수집 DAG 뒤에 붙이지 않고 별도 DAG로 두는 안이 유력하다. 변환은 워터마크라 이번 수집이 skipped여도 밀린 run을 처리해야 하는데, 같은 DAG면 skip이 뒤로 전파된다(`trigger_rule="none_failed"`로 우회해야 함). 별도 DAG면 수집과 변환이 서로 막지 않는다. 실행은 `fetch_delta`가 원본을 쓴 뒤의 Airflow Asset 또는 자체 10분 스케줄. 1~3을 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을지는 소요 시간을 재 보고 정한다.
 
 ### `ev_aggregate_hourly` (매시)
-1. `agg_occupancy` (S) — 지난 구간의 관측·세션에서 증분 집계
-2. `agg_abnormal` (S) — 비정상 지속 목록 갱신
-3. `quality_metrics` (S) — 결측 구간, 불일치 비율, 미지 코드 수
+1. `agg_occupancy` (S) — `core`의 지난 구간 관측·세션 + 디멘션 → `mart.agg_occupancy_hourly`·`agg_station_hourly` (구간 삭제 후 재계산)
+2. `agg_abnormal` (S) — `mart.agg_abnormal` 갱신
+3. `quality_metrics` (S) — 결측 구간, 불일치 비율, 미지 코드 수, 페이징 드리프트 → `ops.quality_metrics`
+
+### `lake_maintenance_daily` (1일 1회, Iceberg 도입 후)
+1. `compact` (S) — `rewrite_data_files`로 작은 파일 합치기 (10분마다 커밋해 작은 파일이 쌓인다)
+2. `expire` (S) — `expire_snapshots`로 오래된 스냅샷 정리 (시간 여행 보존 기간은 설정값)
+3. `remove_orphans` (S) — 실패한 쓰기가 남긴 고아 파일 정리
+
+변환 태스크와 같은 pool `spark`를 써서 겹치지 않게 한다.
 
 ### 예측 (9단계, 10장)
 - `ml_train_weekly` — 피처 생성(S) → 학습(`eonje-ml`, `docker_url`=B) → 모델 파일 SeaweedFS 저장, 운영 버전 Postgres 기록
 - `ml_infer_hourly` — 운영 버전 모델로 배치 추론 → 예측 테이블
 
-재실행 규칙: 원본은 완료된 run을 다시 받지 않고, 중간 실패한 run만 run 폴더를 비우고 다시 받는다 (6장). `obs_status`는 키 충돌 시 무시. 전이·세션은 upsert. 집계는 구간 단위 삭제 후 재계산. 변환·집계의 백필은 Airflow 없이 `eonje.cli`를 직접 호출해도 같은 결과. 수집은 지난 구간을 받을 수 없어 백필이 없다.
+재실행 규칙: 원본은 완료된 run을 다시 받지 않고, 중간 실패한 run만 run 폴더를 비우고 다시 받는다 (6장). `stg.obs_status`와 `core.evt_transition`은 키 충돌 시 무시. 세션은 `MERGE`. 집계는 구간 단위 삭제 후 재계산. 변환·집계의 백필은 Airflow 없이 `eonje.cli`를 직접 호출해도 같은 결과. 수집은 지난 구간을 받을 수 없어 백필이 없다.
 
 ## 8. 인프라·운영
 
@@ -459,6 +472,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - master·worker·드라이버 모두 `network_mode: host`, `spark.driver.host` = A의 랜 IP. 앱마다 `spark.cores.max`·`spark.executor.memory`로 자원을 나눈다
 - A 단독일 때: worker 코어 2~3·메모리 4GB 정도, Spark 앱은 pool 슬롯 1. Spark master UI 포트는 8080에서 바꾼다(Airflow api-server와 충돌), worker UI 포트도 조정
 - B 추가 시: B에 worker를 `spark://<A>:7077`로 붙인다. A의 `.env`·DAG·코드는 바뀌지 않는다. 이후 A의 worker를 줄이거나 내린다(미결)
+- 이미지에 넣는 jar: `iceberg-spark-runtime`, `hadoop-aws`(s3a), Postgres JDBC 드라이버. Iceberg 카탈로그 설정(`spark.sql.catalog.lake.*`)은 `storage/spark.py`가 설정값으로 주입한다
 - 노드 간 통신 (B 추가 후): B → A는 SeaweedFS S3 8333, Postgres 5432, Spark master 7077, 모니터링 수집 대상. A → B는 Docker 데몬(학습 태스크, SSH 방식 권장), 드라이버 ↔ executor 포트. 전부 집 내부망·Tailscale에서만, 필요하면 `spark.authenticate`
 
 ### 8.3 배포 (CI/CD)
@@ -496,6 +510,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 ### 8.5 백업·모니터링·복구
 
 - 원본은 가공 없이 영구 보존. 어떤 정제 결과도 원본에서 재생성 가능
+- 백업 대상은 원본 버킷과 Postgres. DW(`eonje-warehouse` 버킷)는 원본에서 다시 만들 수 있어 오프사이트 대상이 아니다. Iceberg는 카탈로그(Postgres)와 버킷이 같은 시점이어야 맞으므로, 복구 시 DW는 원본에서 재생성하는 것을 기본으로 한다
 - 로컬 백업 (B): A의 원본 버킷을 B로 동기화(`weed filer.sync` 또는 rclone), `pg_dump`를 B에 일 단위 저장 — 빠른 복구용
 - 오프사이트 백업: 원본 Parquet·`pg_dump`를 R2 또는 B2로 — 재해 대비. 노드가 A 하나뿐인 동안에도 오프사이트는 처음부터
 - 복구 절차를 문서화하고 한 번은 실제로 연습한다
@@ -512,7 +527,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 
 ### 8.7 용량과 설정
 
-- 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. Postgres `obs_status`는 월 단위 파티셔닝, 오래된 관측은 Parquet만 보존
+- 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
 - 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
@@ -545,8 +560,8 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | `ev_master_daily` + 차원 테이블과 마이그레이션, Spark 도입(A에 master·worker) | fetch Python, load Spark | A |
-| 4 | 관측 → 전이 → 세션 (10분 Spark 변환). 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
+| 3 | **첫 작업: 호환성 확인** — SeaweedFS + Spark + Iceberg(JDBC 카탈로그)로 작은 테이블 생성·추가·읽기·`MERGE`·유지보수. 실패하면 `stg`·`core`를 Postgres 스키마로 전환. 이어서 Spark 도입(A에 master·worker), `storage/iceberg.py`, `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
+| 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
 | 7 | 프론트 (개발 PC와 Tailscale 안에서 API에 붙여 확인) | — | A |
@@ -569,7 +584,11 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - 오프사이트 백업 대상 (R2 vs B2)
 - B 추가 후 A의 Spark worker 유지(2워커) 여부
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
-- `ev_status_10min`의 Spark 태스크를 한 앱으로 묶을지 (소요 시간 측정 후)
+- 변환 태스크를 한 Spark 앱으로 묶을지 (소요 시간 측정 후), 변환 DAG를 수집 DAG와 분리할지 (4단계, 7장)
+- `ops.charger_state`를 Postgres에 두는 게 맞는지 (10분 갱신 비용을 4단계에서 측정)
+- 공휴일 데이터 출처 (`dim_date`, 공공데이터포털 특일 정보 API 등)
+- 대화형 SQL 조회 엔진(Trino·ClickHouse)을 B에 붙일지
+- Iceberg 시간 여행 보존 기간 (`expire_snapshots` 기준)
 
 ## 13. 코드표 (설계에 쓰는 것만)
 
