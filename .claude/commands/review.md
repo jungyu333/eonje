@@ -25,10 +25,15 @@ Review the current branch against `main` following the project's boundary and da
 - [ ] `__init__.py` files are empty; `cli/jobs/*` contain wiring only, no business logic
 
 ### Spark
-- [ ] Spark I/O only via `s3a://` and JDBC (no local paths); SparkSession and I/O live in `storage/`
+- [ ] Spark I/O only via `s3a://`, the Iceberg catalog, and JDBC (no local paths); SparkSession and I/O live in `storage/`
+- [ ] Iceberg tables are accessed by catalog name only, never by writing Parquet to their path
+- [ ] Keyed Iceberg tables are written with `MERGE INTO` (never plain `append`), and the `ON` condition includes the
+      partition column range taken from the source
+- [ ] Cross-store writes commit Iceberg first, then Postgres (state + the task's own watermark in one transaction)
 - [ ] No `collect()` / `toPandas()` on large DataFrames
 - [ ] `spark.sql.session.timeZone` is set explicitly
-- [ ] Transforms process all unprocessed raw runs (watermark), not only the current run
+- [ ] Transforms process all unprocessed raw runs in `collected_at` order (watermark), not only the current run; each
+      task keeps its own watermark and never passes runs that could still complete late
 
 ### Data Correctness
 - [ ] Raw writes keep all response fields as strings; no filtering or type conversion before storage
@@ -36,7 +41,9 @@ Review the current branch against `main` following the project's boundary and da
 - [ ] `statUpdDt` is not used as a transition timestamp
 - [ ] Unknown status codes are stored, not dropped or raised
 - [ ] Missing observation windows are excluded from occupancy denominators
-- [ ] Deduplication key `(stat_id, charger_id, stat_upd_dt)` is applied before loading observations
+- [ ] `stg.obs_status` keeps one row per `(stat_id, charger_id, observed_at)`: duplicates inside one run are reduced
+      deterministically (latest `stat_upd_dt`, then tie-breakers in design.md 6); the same report seen in another run is
+      a separate observation
 
 ### Budget & Collection
 - [ ] Every API call is recorded in `api_call_log`
@@ -45,7 +52,8 @@ Review the current branch against `main` following the project's boundary and da
 
 ### Schema
 - [ ] Changes to `storage/models.py` have a matching Alembic migration
-- [ ] Bulk loads use `insert(...).on_conflict_do_update`, not per-row `session.add`
+- [ ] Postgres bulk loads use `insert(...).on_conflict_do_*` via a staging table, not per-row `session.add`
+- [ ] Changes to Iceberg tables go through `storage/iceberg.py` (additive only), not ad-hoc DDL
 
 ### Testing
 - [ ] New `transform/` functions have unit tests using `tests/fixtures/`

@@ -36,7 +36,7 @@ feat(storage): add raw parquet writer with run-id partitioning
 feat(transform): derive transitions from charger_state
 feat(dags): add ev_status_10min with budget check
 fix(client): treat resultCode 03 (no data) as empty page, not error
-fix(transform): dedupe observations on (stat_id, charger_id, stat_upd_dt)
+fix(transform): keep one observation per charger within a run
 test(transform): add session reconstruction cases from fixtures
 docs: add collection strategy to design.md
 chore(infra): add postgres init script for airflow/eonje databases

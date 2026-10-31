@@ -15,7 +15,8 @@ Procedure:
 3. Write tests in `tests/unit/` mirroring the module path (`tests/unit/transform/test_sessions.py` for `eonje/transform/sessions.py`). GIVEN / WHEN / THEN structure in the test body, one behavior per test, names that read as sentences.
 4. Always cover, where applicable:
    - empty input (empty page, empty DataFrame)
-   - duplicate observations on `(stat_id, charger_id, stat_upd_dt)`
+   - duplicate observations of one charger inside a run (reduced deterministically) vs. the same report in two runs
+     (kept as two observations)
    - unknown status code (e.g. `"7"`, `""`) — must be kept, not dropped or raised
    - missing optional fields (`lastTedt`, `nowTsdt` empty string)
    - idempotency: applying the function twice to the same input yields the same output

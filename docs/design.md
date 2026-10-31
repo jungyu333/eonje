@@ -110,7 +110,7 @@ eonje/
       db.py               # 엔진·세션, 스테이징 → INSERT ... ON CONFLICT 반영
     transform/            # 순수 함수. Spark DataFrame in → DataFrame out. I/O 없음
       dims.py             # SCD2 비교·갱신 행 생성
-      observations.py     # 중복 제거, 타입 변환, 관측 시각 버킷
+      observations.py     # API 어휘 → 내부 어휘, 타입 변환, run 안 중복 제거 (observed_at = run의 collected_at)
       transitions.py      # charger_state와 비교 → 전이 이벤트
       sessions.py         # last_ts/last_te/now_ts → 세션 upsert 행
       reconcile.py        # 전체 스냅샷 vs 추적 상태 불일치 → 보정 전이
@@ -369,7 +369,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 | 테이블 | 한 행 (grain) | 키 | 쓰기 방식 | 파티션 | 주요 컬럼 |
 |---|---|---|---|---|---|
-| `stg.obs_status` | 충전기 1대가 한 run에서 관측된 1회 (`observed_at` = run의 `collected_at`) | `stat_id, charger_id, observed_at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 적재 전 run 안 중복(페이징 드리프트)은 키당 `stat_upd_dt`가 가장 늦은 행 하나로 줄인다. run이 달라 같은 보고가 다시 보이면 별개의 관측으로 남긴다 | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
+| `stg.obs_status` | 충전기 1대가 한 run에서 관측된 1회 (`observed_at` = run의 `collected_at`) | `stat_id, charger_id, observed_at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 적재 전 run 안 중복(페이징 드리프트)은 키당 하나로 줄이고, 고르는 기준은 결정적이어야 한다: `stat_upd_dt`가 늦은 행 → `page_no`가 큰 행(나중에 받은 페이지) → 그래도 같으면 나머지 컬럼 값의 사전순. 원본에서 다시 만들어도 같은 행이 남는다. run이 달라 같은 보고가 다시 보이면 별개의 관측으로 남긴다 | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
 | `core.evt_transition` | 충전기 1대의 상태 변화 1회 | `stat_id, charger_id, at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
 | `core.fact_session` | 충전 세션 1회 | `stat_id, charger_id, started_at` | `MERGE` (진행 중 세션이 끝나면 갱신) | `started_date` | `ended_at`, `duration_min`, `source`(last_ts/now_ts) |
 | `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (`MERGE`: 바뀐 행은 현재 버전을 닫고 새 버전 추가) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한, `valid_to`, `is_current` |
@@ -412,7 +412,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 ### `ev_master_daily` (1일 1회)
 1. `fetch_pages` (C) — 53페이지 순회, 원본 저장. 페이지 단위 재시도. 호출 로그 기록
-2. `load_dims` (S) — `core.dim_station`·`dim_charger` SCD2 갱신 (변경된 행만 새 버전)
+2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다
 3. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 전체 상태의 관측 적재와 보정(`charger_state`와 비교해 `source=reconciled` 전이)은 이 DAG에서 하지 않는다. full run도 원본 run이므로 변환 흐름(`ev_transform_10min`)이 delta run과 함께 **수집 시각 순서대로** 처리한다. 따로 돌리면 변환이 밀려 있을 때 시각 T의 전체 스냅샷이 T보다 오래된 `charger_state`와 비교되고, 그 뒤 처리되는 과거 delta가 더 새 상태와 비교돼 가짜·역방향 전이가 생긴다.
@@ -429,7 +429,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 2. `derive_transitions` (S) — `stg.obs_status`를 run 순서대로 `ops.charger_state`와 비교해 `core.evt_transition` 추가, `charger_state` 갱신. full run이면 불일치가 보정 전이(`source=reconciled`)
 3. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `core.fact_session` `MERGE`
 
-**워터마크는 태스크마다 따로 둔다** (`ops.transform_watermark`: 태스크 → 처리한 마지막 run). 각 태스크는 자기 쓰기를 커밋한 뒤 자기 워터마크를 올린다. 앞 태스크의 워터마크가 뒤 태스크가 처리할 수 있는 상한이다 (`derive_transitions`는 `dedupe_load_obs`가 끝낸 run까지만). 그래서 3번만 실패해 3번만 재시도해도 자기 워터마크부터 이어서 처리한다. 1~3을 한 Spark 앱으로 묶어도 워터마크는 태스크별로 같은 규칙을 따른다. run 순서는 `collected_at` 오름차순(같으면 `run_key`). 단, 아직 완료될 수 있는 run을 지나치지 않도록 `collected_at`이 지금보다 수집 지연 허용치(`EONJE_FETCH_MAX_LAG_MIN`)와 수집 태스크 최대 실행 시간 이상 지난 run까지만 처리한다. 그렇지 않으면 실패 후 재시도로 늦게 완료된 이른 run이 워터마크 뒤에 남아 영영 처리되지 않는다.
+**워터마크는 태스크마다 따로 둔다** (`ops.transform_watermark`: 태스크 → 처리한 마지막 run). 각 태스크는 자기 쓰기를 커밋한 뒤 자기 워터마크를 올린다. 앞 태스크의 워터마크가 뒤 태스크가 처리할 수 있는 상한이다 (`derive_transitions`는 `dedupe_load_obs`가 끝낸 run까지만). 그래서 3번만 실패해 3번만 재시도해도 자기 워터마크부터 이어서 처리한다. 1~3을 한 Spark 앱으로 묶어도 워터마크는 태스크별로 같은 규칙을 따른다. run 순서는 `collected_at` 오름차순(같으면 `run_key`). 단, 아직 완료될 수 있는 run을 지나치지 않도록 `collected_at`이 지금보다 수집 지연 허용치(`EONJE_FETCH_MAX_LAG_MIN`)와 수집 태스크 최대 실행 시간(`EONJE_COLLECT_TIMEOUT_MIN`, 수집 태스크의 Airflow `execution_timeout`과 같은 값) 이상 지난 run까지만 처리한다. 그렇지 않으면 실패 후 재시도로 늦게 완료된 이른 run이 워터마크 뒤에 남아 영영 처리되지 않는다.
 
 **`ops.charger_state`를 쓰는 건 `derive_transitions` 하나뿐이고, 동시에 두 개가 돌지 않게 한다.** 변환 DAG `max_active_runs=1`과 pool `spark` 슬롯 수와 무관하게, 태스크가 Postgres advisory lock(`pg_advisory_lock`)을 잡고 돈다. 수동 CLI 실행도 같은 lock에 걸린다.
 
@@ -531,7 +531,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - 원본은 가공 없이 영구 보존. 어떤 정제 결과도 원본에서 재생성 가능
 - 백업 대상은 원본 버킷과 Postgres. DW(`eonje-warehouse` 버킷)는 원본에서 다시 만들 수 있어 오프사이트 대상이 아니다. Iceberg는 카탈로그(Postgres)와 버킷이 같은 시점이어야 맞으므로, 복구 시 DW는 원본에서 재생성하는 것을 기본으로 한다
   - `pg_dump`는 `--exclude-schema=iceberg`로 카탈로그를 빼고 뜬다. 함께 뜨면 버킷 없이 복구했을 때 카탈로그가 없는 메타데이터 파일을 가리킨다
-  - 복구 순서: Postgres 복원 → `ensure-iceberg-tables`로 빈 테이블 생성 → **한 트랜잭션으로 변환 워터마크 초기화 + `ops.charger_state` 비우기** → 원본 전체를 순서대로 변환 (백필). 덤프 시점의 `charger_state`를 남겨 두면 처음부터 다시 만드는 전이가 그 상태와 비교돼 어긋난다. 백필이 끝나면 `charger_state`는 마지막 run까지 반영된 상태가 되고, 10분 변환이 그대로 이어 쓴다
+  - 복구 순서: Postgres 복원 → `eonje-warehouse` 버킷 비우기(남은 데이터·메타데이터 파일은 새 카탈로그에서 고아가 된다) → `ensure-iceberg-tables`로 빈 테이블 생성 → **한 트랜잭션으로 변환 워터마크 초기화 + `ops.charger_state` 비우기** → 원본 전체를 순서대로 변환 (백필). 덤프 시점의 `charger_state`를 남겨 두면 처음부터 다시 만드는 전이가 그 상태와 비교돼 어긋난다. 백필이 끝나면 `charger_state`는 마지막 run까지 반영된 상태가 되고, 10분 변환이 그대로 이어 쓴다
 - 로컬 백업 (B): A의 원본 버킷을 B로 동기화(`weed filer.sync` 또는 rclone), `pg_dump`를 B에 일 단위 저장 — 빠른 복구용
 - 오프사이트 백업: 원본 Parquet·`pg_dump`를 R2 또는 B2로 — 재해 대비. 노드가 A 하나뿐인 동안에도 오프사이트는 처음부터
 - 복구 절차를 문서화하고 한 번은 실제로 연습한다
@@ -549,7 +549,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 ### 8.7 용량과 설정
 
 - 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
-- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
+- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
 ## 9. 서빙 (초안)
@@ -558,7 +558,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 
 - `GET /v1/stations?zscode=&kind=&bbox=` — 충전소 목록 + 현재 시간대 점유율
 - `GET /v1/stations/{stat_id}` — 상세 화면 전체: 기본 정보, 요약 지표, 히트맵, 비는 시간대, 충전기 목록
-- `GET /v1/stations/{stat_id}/chargers/{chger_id}` — 충전기 단위 패턴 (펼침용)
+- `GET /v1/stations/{stat_id}/chargers/{charger_id}` — 충전기 단위 패턴 (펼침용)
 - `GET /v1/abnormal?zscode=&min_days=` — 장기 비정상 충전기
 - `GET /v1/stats?by=kind|zscode|busi&dow=&hour=` — 단면 통계
 
