@@ -24,8 +24,11 @@ compose=(docker compose
 "${compose[@]}" up -d --wait postgres seaweedfs
 "${compose[@]}" run --rm -T migrate < /dev/null
 
+# 버킷이 이미 있으면 weed shell이 0이 아닌 코드로 끝날 수 있다. 판단은 출력으로 하고,
+# set -e가 출력을 보여 주기도 전에 스크립트를 끝내지 않게 || true를 붙인다
+echo "ensure bucket"
 bucket_out=$("${compose[@]}" exec -T seaweedfs sh -c \
-  'echo "s3.bucket.create -name ${EONJE_RAW_BUCKET:-eonje-raw}" | weed shell' 2>&1 < /dev/null)
+  'echo "s3.bucket.create -name ${EONJE_RAW_BUCKET:-eonje-raw}" | weed shell' 2>&1 < /dev/null) || true
 echo "$bucket_out"
 case "$bucket_out" in
   *"created bucket"*|*"already exists"*) ;;
