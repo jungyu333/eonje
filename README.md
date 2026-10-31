@@ -11,11 +11,12 @@
 ## 구조
 
 ```
-환경부 EvCharger API → Airflow 수집 → 원본 Parquet → 정제·집계 (Postgres) → FastAPI → 웹
+환경부 EvCharger API → Airflow 수집 → 원본 Parquet (레이크) → Spark 정제 → Iceberg DW → 마트 (Postgres) → FastAPI → 웹
 ```
 
 - 수집: 변경분 10분 주기 + 전체 1일 1회. 일 호출 한도 안에서 동작하도록 예산 관리
 - 원본은 가공 없이 보존하고, 모든 정제·집계는 원본에서 재생성 가능
+- DW는 SeaweedFS 위 Iceberg 테이블(팩트·디멘션), API가 읽는 집계와 현재 상태는 Postgres
 - 파이프라인 코드 (`eonje/`)는 Airflow에 의존하지 않고, 태스크는 별도 컨테이너에서 실행
 
 ## 문서
