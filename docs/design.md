@@ -81,7 +81,7 @@ DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색�
   | `eonje-ml` | `docker/tasks/ml/` | eonje + LightGBM 등 | 학습·배치 추론 (9단계) |
   | `eonje-api` | `docker/api/` | eonje + FastAPI | 조회 API |
 
-- 태스크는 `DockerOperator(image="eonje-<runtime>:<sha>", command=["<job>", "--run-id", "{{ run_id }}", "--run-after", "{{ dag_run.run_after.isoformat() }}"])`. 이미지 진입점이 `python -m eonje.cli`라 명령에는 job과 인자만 준다. `--run-after`(ISO 8601, 오프셋 필수)가 수집 시각과 날짜 파티션을 정하므로 둘 다 필수다
+- 태스크는 `DockerOperator(image="<EONJE_IMAGE_REPO>-<runtime>:<EONJE_IMAGE_TAG>", command=["<job>", "--run-id", "{{ run_id }}", "--run-after", "{{ dag_run.run_after.isoformat() }}"])`. 이미지 진입점이 `python -m eonje.cli`라 명령에는 job과 인자만 준다. `--run-after`(ISO 8601, 오프셋 필수)가 수집 시각과 날짜 파티션을 정하므로 둘 다 필수다
   - `@task.docker`가 아니라 `DockerOperator`인 이유: `@task.docker`는 DAG 파일의 Python 함수를 직렬화해 컨테이너에서 실행한다. 우리 태스크는 이미지 안의 `eonje` 패키지와 CLI를 그대로 실행하므로 이미지 + 명령을 받는 `DockerOperator`가 맞다 (2026.10.31)
   - 설정 전달: `EONJE_*` 값(서비스 키 포함)은 scheduler 컨테이너만 `.env`에서 받고, 태스크가 **실행될 때** 그 환경에서 읽어 `private_environment`로 넘긴다(`dags/`의 `EonjeTask`). DAG 파싱 때 넘기면 직렬화된 DAG로 Airflow DB에 남는다. 컨테이너 네트워크 안 주소(`postgres`, `seaweedfs`)는 compose가 scheduler 환경에서 덮어쓴다
   - `skip_on_exit_code=99`(예산 소진·늦은 run은 skipped), `do_xcom_push=False`(컨테이너 마지막 로그 줄을 XCom에 쌓지 않음), `mount_tmp_dir=False`
@@ -253,7 +253,7 @@ flowchart TB
 | 공개·TLS | Cloudflare Tunnel + Cloudflare DNS (무료 플랜) | 포트포워딩·고정 IP·인증서 관리 없음. 집 IP 비노출, 기본 DDoS 방어 |
 | 관리 접근 | Tailscale | SSH, Airflow·Spark·SeaweedFS·Grafana UI. CD 러너도 tailnet으로 접속 |
 | 컨테이너 | Docker, docker compose (노드별 파일) | 개발 PC = 노드 A 구성 |
-| 이미지 레지스트리 | GHCR (`ghcr.io/jungyu333/eonje-*:<git-sha>`) | Actions `GITHUB_TOKEN`으로 푸시. 공개 이미지라 서버 pull에 인증 불필요 |
+| 이미지 레지스트리 | GHCR (`ghcr.io/jungyu333/eonje-*:<git-sha>`) | Actions `GITHUB_TOKEN`으로 푸시. 공개 이미지라 서버 pull에 인증 불필요. compose와 DAG는 이미지 이름을 `${EONJE_IMAGE_REPO}-<runtime>:${EONJE_IMAGE_TAG}`로 만든다: 개발 PC `eonje`·`dev`(`make build`), 운영 `ghcr.io/jungyu333/eonje`·git sha |
 | 운영 노드 | 집 미니PC (A 상시, B는 부족 신호 시 추가) | 8.1 |
 | 테스트 | pytest, 실제 응답 fixture, 로컬 SparkSession | `transform/`은 fixture로 커버. DB 테스트는 `db` 마커 + Actions `services:` Postgres |
 | 품질 | ruff (lint·format), mypy strict, pre-commit | pre-commit 훅: ruff(프로젝트 venv 버전), ruff-format, EOF·공백·YAML·TOML 검사, 대용량 파일·개인키 차단. mypy는 CI |
@@ -523,6 +523,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - 롤백: `workflow_dispatch`로 이전 sha를 다시 배포
 - self-hosted runner는 쓰지 않는다 (public 레포)
 - 단계: CI는 골격 직후 PR, CD는 수집기 배포(2단계) PR
+- CD PR에서 정할 것: 서버 배치를 개발 PC와 같게(`~/eonje/infra/compose.node-a.yaml` + `~/eonje/.env`) 둘지 — compose가 `../.env`(scheduler `env_file`)와 `../dags`(개발용 마운트)를 상대 경로로 쓴다. 운영은 `dags/` 마운트 대신 GitDagBundle
 
 ### 8.4 공개와 접근
 

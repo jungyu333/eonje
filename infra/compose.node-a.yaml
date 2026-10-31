@@ -1,7 +1,7 @@
 name: eonje
 
 x-airflow: &airflow
-  image: eonje-airflow:${EONJE_IMAGE_TAG:-dev}
+  image: ${EONJE_IMAGE_REPO:-eonje}-airflow:${EONJE_IMAGE_TAG:-dev}
   restart: unless-stopped
   environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -13,6 +13,7 @@ x-airflow: &airflow
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"   # 켜기 전엔 스케줄로 안 돎
     AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
+    EONJE_IMAGE_REPO: ${EONJE_IMAGE_REPO:-eonje}
     EONJE_IMAGE_TAG: ${EONJE_IMAGE_TAG:-dev}
     EONJE_STATUS_INTERVAL_MIN: ${EONJE_STATUS_INTERVAL_MIN:-10}
     EONJE_COLLECT_TIMEOUT_MIN: ${EONJE_COLLECT_TIMEOUT_MIN:-5}
@@ -69,7 +70,7 @@ services:
       retries: 20
 
   migrate:
-    image: eonje-collector:${EONJE_IMAGE_TAG:-dev}
+    image: ${EONJE_IMAGE_REPO:-eonje}-collector:${EONJE_IMAGE_TAG:-dev}
     profiles: [ "tools" ]
     entrypoint: [ "alembic", "upgrade", "head" ]
     environment:
