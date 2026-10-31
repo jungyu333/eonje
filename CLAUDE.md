@@ -46,7 +46,8 @@ docs/         # design.md, requirements.md
   models). Iceberg: `storage/iceberg.py`, applied by an idempotent job (`CREATE TABLE IF NOT EXISTS`, add missing
   columns) — never Alembic. Alembic ignores the `iceberg` catalog schema.
 - **Bulk loads never use `session.add` per row.** Postgres: Spark writes a JDBC staging table, then
-  `INSERT ... ON CONFLICT`. Iceberg: Spark `append` or `MERGE INTO`.
+  `INSERT ... ON CONFLICT`. Iceberg: `MERGE INTO` for every keyed table (`WHEN NOT MATCHED INSERT` for
+  ignore-on-conflict) — never plain `append`, which duplicates rows on rerun because Iceberg has no unique constraints.
 - **Raw responses are stored as received** — all columns as strings, unknown fields kept. Type conversion happens in
   `transform/`.
 - **`__init__.py` files are empty.** No logic, no re-exports. Import from the module (`from eonje.cli.app import main`).
@@ -60,6 +61,10 @@ docs/         # design.md, requirements.md
   present) is never fetched again, because the API only serves the last N minutes and a refetch would relabel new data
   and delete the original; only an incomplete run is cleared and fetched again. `stg.obs_status` and `core.evt_transition`: ignore on conflict (facts are append-only; corrections are new rows).
   `core.fact_session`: `MERGE`. Aggregates: delete the window, recompute.
+- **Cross-store writes go Iceberg first, Postgres last.** Transition derivation commits `core.evt_transition` (MERGE),
+  then updates `ops.charger_state` and the transform watermark in one Postgres transaction. Never the reverse: a failed
+  Iceberg commit after a state update loses transitions for good. `charger_state` is a derived cache rebuildable from
+  `core.evt_transition`.
 - `statUpdDt` is **not** a transition time (operator-dependent heartbeat). Transitions are derived by comparing against
   `charger_state`.
 - All timestamps are timezone-aware. Naive datetimes are rejected at the storage boundary; stored values are UTC.
@@ -74,7 +79,8 @@ docs/         # design.md, requirements.md
 - Read/write only via `s3a://` (SeaweedFS S3), the Iceberg catalog, and JDBC — never local paths (executors on other
   nodes cannot see them).
 - **Iceberg tables only by catalog name** (`lake.stg.obs_status`), never by writing Parquet to their path. Partition by a
-  KST date column (`observed_date`), not `days()` (UTC). Tables are compacted and snapshots expired daily.
+  KST date column per table (`*_date`: `observed_date`, `at_date`, `started_date`), not `days()` (UTC). Tables are
+  compacted and snapshots expired daily.
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
 - jars and packages are baked into the `eonje-spark` image; never fetched at runtime.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.

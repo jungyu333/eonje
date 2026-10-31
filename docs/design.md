@@ -150,8 +150,8 @@ eonje/
 - **API 어휘(`statId`, `chgerId`, `stat`…)는 `observations.py`에서 내부 어휘(`stat_id`, `charger_id`, `status_code`)로 한 번 번역**하고, 그 아래로는 내부 어휘만 쓴다. 응답 필드가 바뀌어도 수정 지점은 한 곳.
 - 설정값은 `config.py`에서만 읽는다. DAG 스케줄 간격도 거기서 가져온다 (DAG 파일은 환경변수를 직접 읽음 — eonje import 불가).
 - **`__init__.py`에는 로직을 두지 않는다.** 전부 빈 파일. re-export도 하지 않아 import는 항상 모듈까지 적는다 (`from eonje.cli.app import main`). `__main__.py`는 위임 두 줄만.
-- **스키마의 단일 출처는 저장소마다 하나.** Postgres(`mart`·`ops`)는 `models.py` — 파이프라인 적재와 API 조회가 같은 모델을 쓰고, Alembic이 여기서 만든다. Iceberg(`stg`·`core`)는 `storage/iceberg.py` — Alembic 대상이 아니므로 정의를 코드로 두고 멱등한 생성(`CREATE TABLE IF NOT EXISTS`)·컬럼 추가 잡으로 적용한다.
-- 대량 적재: Postgres는 Spark → JDBC 스테이징 테이블 → `INSERT ... ON CONFLICT`, Iceberg는 Spark `append`·`MERGE INTO`. 행 단위 `session.add`는 금지.
+- **스키마의 단일 출처는 저장소마다 하나.** Postgres(`mart`·`ops`)는 `models.py` — 파이프라인 적재와 API 조회가 같은 모델을 쓰고, Alembic이 여기서 만든다. Iceberg(`stg`·`core`)는 `storage/iceberg.py` — Alembic 대상이 아니므로 정의를 코드로 두고 멱등한 생성(`CREATE TABLE IF NOT EXISTS`)·컬럼 추가 잡(`ensure-iceberg-tables`)으로 적용한다. 두 스키마 모두 CD가 배포 때 적용한다 (8.3).
+- 대량 적재: Postgres는 Spark → JDBC 스테이징 테이블 → `INSERT ... ON CONFLICT`, Iceberg는 Spark `MERGE INTO`(키가 있는 테이블은 전부. 단순 `append`는 고유 제약이 없어 재실행 시 중복을 만든다). 행 단위 `session.add`는 금지.
 - **Spark 규칙 (처음부터 지킨다):** 데이터는 `s3a://`(SeaweedFS), Iceberg 카탈로그, JDBC로만 읽고 쓴다 — 로컬 경로 금지(다른 노드의 executor가 못 읽음). **Iceberg 테이블은 카탈로그 이름으로만** 읽고 쓴다 (경로로 Parquet을 직접 쓰면 테이블 메타데이터에 안 잡힌다). jar·패키지는 전부 이미지에 넣는다. 큰 데이터에 `collect()`·`toPandas()` 금지. `spark.sql.session.timeZone=Asia/Seoul`을 명시한다.
 
 ### 2.5 런타임 토폴로지
@@ -173,7 +173,7 @@ flowchart TB
     subgraph B[노드 B · 추가 시 · compose.node-b]
         SWB[spark worker]
         MON[Prometheus · Grafana · Loki]
-        BK[로컬 백업<br/>mc mirror · pg_dump]
+        BK[로컬 백업<br/>weed filer.sync · pg_dump]
         MLT[모델 학습 컨테이너<br/>docker_url=B]
     end
     SC -->|docker run| TK
@@ -369,13 +369,14 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 | 테이블 | 한 행 (grain) | 키 | 쓰기 방식 | 파티션 | 주요 컬럼 |
 |---|---|---|---|---|---|
 | `stg.obs_status` | 충전기 1대의 관측 1회 | `stat_id, charger_id, observed_at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`) | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
-| `core.evt_transition` | 충전기 1대의 상태 변화 1회 | `stat_id, charger_id, at` | 추가만. 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
+| `core.evt_transition` | 충전기 1대의 상태 변화 1회 | `stat_id, charger_id, at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
 | `core.fact_session` | 충전 세션 1회 | `stat_id, charger_id, started_at` | `MERGE` (진행 중 세션이 끝나면 갱신) | `started_date` | `ended_at`, `duration_min`, `source`(last_ts/now_ts) |
-| `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (바뀐 행만 새 버전) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한, `valid_to`, `is_current` |
-| `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 | 없음 | 타입·출력·방식·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current` |
+| `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (`MERGE`: 바뀐 행은 현재 버전을 닫고 새 버전 추가) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한, `valid_to`, `is_current` |
+| `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 (`MERGE`) | 없음 | 타입·출력·방식·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current` |
 | `core.dim_date` | 날짜 1일 | `date` | 정적 (공휴일 갱신 시 재생성) | 없음 | 요일, 주말, 공휴일 |
 
 - 팩트는 **추가만** 한다. 고칠 일은 새 행으로 남긴다 (보정 전이). 예외는 세션 종료 갱신 하나
+- **키가 있는 테이블은 단순 `append`로 쓰지 않는다.** Iceberg에는 고유 제약이 없어 재실행하면 중복 행이 생긴다. 키 충돌 무시는 `MERGE ... WHEN NOT MATCHED INSERT`로 구현한다. 단순 `append`는 키가 없는 테이블에만
 - 디멘션 연결: 팩트 시각이 디멘션의 `[valid_from, valid_to)`에 들어가는 버전. 현재 버전은 `valid_to = 9999-12-31`, `is_current = true`
 - 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
 
@@ -425,6 +426,13 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 2. `derive_transitions` (S) — `ops.charger_state`와 비교해 `core.evt_transition` 추가, `charger_state` 갱신
 3. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `core.fact_session` `MERGE`
 
+**저장소를 넘는 쓰기 — 전이 계산 (`derive_transitions`, `reconcile_state`).** 입력 비교는 `ops.charger_state`(Postgres), 결과는 `core.evt_transition`(Iceberg)이라 한 트랜잭션으로 묶을 수 없다. 그래서 순서와 복구 규칙으로 멱등을 지킨다.
+- **Iceberg 먼저, Postgres 나중.** `core.evt_transition`을 `MERGE`(키 충돌 무시)로 커밋한 뒤에, `ops.charger_state` 갱신과 변환 워터마크(처리한 마지막 run) 기록을 **하나의 Postgres 트랜잭션**으로 한다
+- Iceberg 커밋이 실패하면 아무것도 바뀌지 않는다 → 그대로 재실행
+- Iceberg는 커밋됐는데 Postgres가 실패하면, 재실행 때 `charger_state`가 예전 상태라 같은 전이를 다시 계산하고 `MERGE`가 중복을 무시한다 → 결과가 같다
+- 반대 순서(`charger_state` 먼저)는 금지: 갱신 후 Iceberg가 실패하면 재실행이 새 상태와 비교해 전이를 영구히 잃는다
+- `ops.charger_state`는 파생 캐시다. 충전기별 `core.evt_transition` 마지막 `to_status`(+ 이후 관측)에서 언제든 다시 만들 수 있고, 지난 구간을 다시 변환(백필)할 때는 `charger_state`가 아니라 그 시점의 전이 이력에서 상태를 재구성한다
+
 수집 DAG 뒤에 붙이지 않고 별도 DAG로 두는 안이 유력하다. 변환은 워터마크라 이번 수집이 skipped여도 밀린 run을 처리해야 하는데, 같은 DAG면 skip이 뒤로 전파된다(`trigger_rule="none_failed"`로 우회해야 함). 별도 DAG면 수집과 변환이 서로 막지 않는다. 실행은 `fetch_delta`가 원본을 쓴 뒤의 Airflow Asset 또는 자체 10분 스케줄. 1~3을 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을지는 소요 시간을 재 보고 정한다.
 
 ### `ev_aggregate_hourly` (매시)
@@ -434,7 +442,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 ### `lake_maintenance_daily` (1일 1회, Iceberg 도입 후)
 1. `compact` (S) — `rewrite_data_files`로 작은 파일 합치기 (10분마다 커밋해 작은 파일이 쌓인다)
-2. `expire` (S) — `expire_snapshots`로 오래된 스냅샷 정리 (시간 여행 보존 기간은 설정값)
+2. `expire` (S) — `expire_snapshots`로 오래된 스냅샷 정리 (보존 기간 `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`)
 3. `remove_orphans` (S) — 실패한 쓰기가 남긴 고아 파일 정리
 
 변환 태스크와 같은 pool `spark`를 써서 겹치지 않게 한다.
@@ -491,9 +499,11 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - **CD** (main 머지):
   1. 이미지 빌드 → GHCR에 `<git-sha>` 태그로 푸시
   2. deploy 잡이 Tailscale에 임시 노드(`tag:ci`)로 접속. ACL로 노드의 SSH 포트에만 허용
-  3. `scp`로 compose 파일 복사 → `ssh <노드> "EONJE_IMAGE_TAG=<sha> docker compose pull && docker compose up -d"`
-  4. 헬스체크 (API `/health`, Airflow 상태)
-  5. Git의 `deploy` ref를 `<sha>`로 이동 → Airflow가 새 DAG를 가져감
+  3. `scp`로 compose 파일 복사 → `ssh <노드> "EONJE_IMAGE_TAG=<sha> docker compose pull"`
+  4. 스키마 적용: Postgres는 Alembic `upgrade head`(collector 이미지, 마이그레이션 포함), Iceberg는 `ensure-iceberg-tables`(spark 이미지, 3단계부터). 둘 다 멱등이라 매 배포마다 돌린다. 실패하면 배포를 멈추고 `deploy` ref를 옮기지 않는다 → 새 DAG가 없는 테이블을 부르지 않는다
+  5. `docker compose up -d`
+  6. 헬스체크 (API `/health`, Airflow 상태)
+  7. Git의 `deploy` ref를 `<sha>`로 이동 → Airflow가 새 DAG를 가져감
 - **DAG 배포는 GitDagBundle**(`tracking_ref=deploy`, `subdir=dags`). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 이미지 푸시 후 ref를 옮겨 순서를 보장한다. DAG만 바뀌면 ref만 옮기면 된다
 - 배포 전용 SSH 키와 Tailscale OAuth 클라이언트는 GitHub Secrets. 필요하면 GitHub Environment `production`으로 수동 승인
 - 롤백: `workflow_dispatch`로 이전 sha를 다시 배포
@@ -511,6 +521,8 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 - 원본은 가공 없이 영구 보존. 어떤 정제 결과도 원본에서 재생성 가능
 - 백업 대상은 원본 버킷과 Postgres. DW(`eonje-warehouse` 버킷)는 원본에서 다시 만들 수 있어 오프사이트 대상이 아니다. Iceberg는 카탈로그(Postgres)와 버킷이 같은 시점이어야 맞으므로, 복구 시 DW는 원본에서 재생성하는 것을 기본으로 한다
+  - `pg_dump`는 `--exclude-schema=iceberg`로 카탈로그를 빼고 뜬다. 함께 뜨면 버킷 없이 복구했을 때 카탈로그가 없는 메타데이터 파일을 가리킨다
+  - 복구 순서: Postgres 복원 → `ensure-iceberg-tables`로 빈 테이블 생성 → 변환 워터마크 초기화 → 원본 전체를 변환 (백필)
 - 로컬 백업 (B): A의 원본 버킷을 B로 동기화(`weed filer.sync` 또는 rclone), `pg_dump`를 B에 일 단위 저장 — 빠른 복구용
 - 오프사이트 백업: 원본 Parquet·`pg_dump`를 R2 또는 B2로 — 재해 대비. 노드가 A 하나뿐인 동안에도 오프사이트는 처음부터
 - 복구 절차를 문서화하고 한 번은 실제로 연습한다
@@ -528,7 +540,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 ### 8.7 용량과 설정
 
 - 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
-- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`
+- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
 ## 9. 서빙 (초안)
@@ -585,7 +597,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - B 추가 후 A의 Spark worker 유지(2워커) 여부
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
 - 변환 태스크를 한 Spark 앱으로 묶을지 (소요 시간 측정 후), 변환 DAG를 수집 DAG와 분리할지 (4단계, 7장)
-- `ops.charger_state`를 Postgres에 두는 게 맞는지 (10분 갱신 비용을 4단계에서 측정)
+- `ops.charger_state`를 Postgres에 두는 게 맞는지 (10분 갱신 비용을 4단계에서 측정). Iceberg로 옮기면 전이 계산이 한 저장소 안에서 끝나 위 쓰기 순서 규칙이 필요 없어진다 (7장)
 - 공휴일 데이터 출처 (`dim_date`, 공공데이터포털 특일 정보 API 등)
 - 대화형 SQL 조회 엔진(Trino·ClickHouse)을 B에 붙일지
 - Iceberg 시간 여행 보존 기간 (`expire_snapshots` 기준)
