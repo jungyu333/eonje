@@ -357,23 +357,44 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - manifest가 없는 run(중간 실패)만 run 폴더를 비우고 다시 받는다. 다시 수집하고 싶으면 새 run_id
 - 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 
-### 서빙·정제 (Postgres `eonje` DB, `storage/models.py`)
+### DW (Iceberg `stg`·`core`, `storage/iceberg.py`)
 
-| 테이블 | 키 | 내용 |
-|---|---|---|
-| `dim_station` | `stat_id` | 충전소. 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한. SCD2 (`valid_from`, `valid_to`) |
-| `dim_charger` | `stat_id, chger_id` | 충전기. 타입·출력·방식·제조사·설치년도·층·삭제 여부. SCD2 |
-| `obs_status` | `stat_id, chger_id, observed_at` | 관측 1행. `stat`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full) |
-| `evt_transition` | `stat_id, chger_id, at` | 상태 전이. `from_stat`, `to_stat`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
-| `fact_session` | `stat_id, chger_id, started_at` | 충전 세션. `ended_at`, `duration_min`, `source`(last_ts/now_ts). `lastTsdt`/`lastTedt` 쌍이 새로 보일 때 upsert |
-| `charger_state` | `stat_id, chger_id` | 충전기별 마지막으로 알려진 상태 (전이 계산용 현재 상태) |
-| `agg_occupancy_hourly` | `stat_id, chger_id, dow, hour` | 점유율(충전중 비율), 관측 수, 세션 수, 평균 세션 길이 |
-| `agg_station_hourly` | `stat_id, dow, hour` | 충전소 단위 (충전기 합산) |
-| `agg_abnormal` | `stat_id, chger_id` | 비정상 상태(1·4·5·9) 시작 시각, 지속 일수 |
-| `api_call_log` | `id` (PK), 인덱스 `called_at` | EvCharger API HTTP 시도 1회 = 1행 (재시도 포함, 일일 한도 계산 기준). `called_at`, `job`, `run_id`(Airflow 원문), `operation`, `page_no`, `attempt`, `params`(JSONB, serviceKey 제외), `http_status`, `result_code`, `total_count`, `elapsed_ms` |
-| `ml_model` | `name, version` | 모델 파일 경로(SeaweedFS), 학습 구간, 정확도, 운영 버전 여부 (9단계) |
-| `pred_*` | 대상별 | 매시 배치 추론 결과. API는 이 테이블만 읽음 (9단계) |
-| `ref_code_*` | 코드, 버전 | 상태·충전기타입·지역·시설·기관 코드표 |
+- 위치: SeaweedFS `eonje-warehouse` 버킷(`s3a://eonje-warehouse/`). 카탈로그는 Iceberg JDBC 카탈로그로 Postgres `eonje` DB의 `iceberg` 스키마에 둔다. Spark 카탈로그 이름은 `lake` (`lake.stg.obs_status`)
+- 카탈로그 테이블(`iceberg_tables` 등)은 Iceberg가 만든다. Alembic이 지우려 들지 않도록 마이그레이션 비교에서 `iceberg` 스키마를 뺀다
+- 스키마 정의는 `storage/iceberg.py` 하나. 적용은 멱등한 잡(`CREATE TABLE IF NOT EXISTS`, 없는 컬럼만 `ADD COLUMN`). 컬럼 삭제·타입 변경은 하지 않고 새 컬럼으로 옮긴다
+- 날짜 파티션은 KST 날짜 컬럼(`*_date`)을 따로 두고 그 값으로 나눈다. Iceberg의 `days()` 변환은 UTC 기준이라 KST 날짜와 어긋난다
+
+| 테이블 | 한 행 (grain) | 키 | 쓰기 방식 | 파티션 | 주요 컬럼 |
+|---|---|---|---|---|---|
+| `stg.obs_status` | 충전기 1대의 관측 1회 | `stat_id, charger_id, observed_at` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`) | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
+| `core.evt_transition` | 충전기 1대의 상태 변화 1회 | `stat_id, charger_id, at` | 추가만. 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
+| `core.fact_session` | 충전 세션 1회 | `stat_id, charger_id, started_at` | `MERGE` (진행 중 세션이 끝나면 갱신) | `started_date` | `ended_at`, `duration_min`, `source`(last_ts/now_ts) |
+| `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (바뀐 행만 새 버전) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한, `valid_to`, `is_current` |
+| `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 | 없음 | 타입·출력·방식·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current` |
+| `core.dim_date` | 날짜 1일 | `date` | 정적 (공휴일 갱신 시 재생성) | 없음 | 요일, 주말, 공휴일 |
+
+- 팩트는 **추가만** 한다. 고칠 일은 새 행으로 남긴다 (보정 전이). 예외는 세션 종료 갱신 하나
+- 디멘션 연결: 팩트 시각이 디멘션의 `[valid_from, valid_to)`에 들어가는 버전. 현재 버전은 `valid_to = 9999-12-31`, `is_current = true`
+- 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
+
+### 서빙·운영 (Postgres `eonje` DB, `storage/models.py`)
+
+| 테이블 | 키 | 쓰기 방식 | 내용 |
+|---|---|---|---|
+| `ops.charger_state` | `stat_id, charger_id` | 10분마다 갱신 | 충전기별 마지막으로 알려진 상태 (전이 계산용 현재 상태). 갱신이 잦아 DW가 아니라 Postgres |
+| `ops.api_call_log` | `id` (PK), 인덱스 `called_at` | 추가만 | EvCharger API HTTP 시도 1회 = 1행 (재시도 포함, 일일 한도 계산 기준). `called_at`, `job`, `run_id`(Airflow 원문), `operation`, `page_no`, `attempt`, `params`(JSONB, serviceKey 제외), `http_status`, `result_code`, `total_count`, `elapsed_ms`. 지금은 기본 스키마에 있고 `ops`로 옮기는 건 4단계 첫 마이그레이션에서 |
+| `ops.quality_metrics` | `metric, at` | 추가만 | 결측 구간, 불일치 비율, 미지 코드 수, 페이징 드리프트 |
+| `mart.agg_occupancy_hourly` | `stat_id, charger_id, dow, hour` | 구간 삭제 후 재계산 | 점유율(충전중 비율), 관측 수, 세션 수, 평균 세션 길이 |
+| `mart.agg_station_hourly` | `stat_id, dow, hour` | 구간 삭제 후 재계산 | 충전소 단위 (충전기 합산) |
+| `mart.agg_abnormal` | `stat_id, charger_id` | 매시 재계산 | 비정상 상태(1·4·5·9) 시작 시각, 지속 일수 |
+| `mart.pred_*` | 대상별 | 매시 재계산 | 배치 추론 결과. API는 이 테이블만 읽음 (9단계) |
+| `ops.ml_model` | `name, version` | 추가 | 모델 파일 경로(SeaweedFS), 학습 구간, 정확도, 운영 버전 여부 (9단계) |
+| `ref_code_*` | 코드, 버전 | 버전 추가 | 상태·충전기타입·지역·시설·기관 코드표. Spark는 JDBC로 읽는다 |
+
+규칙:
+- 시각: 저장은 UTC, 날짜 파티션과 요일·시간대 계산은 KST
+- 결측: 관측이 없는 구간은 "모름"이다. "비어 있음"이 아니며 점유율 분모에서 뺀다
+- 멱등성: 정제는 중복 키 무시, 전이는 키 기준 추가(같은 키면 무시), 세션은 `MERGE`, 마트는 구간 재계산. 모든 계층은 아래 계층에서 다시 만들 수 있다 (원본 → `stg` → `core` → `mart`)
 
 관측과 세션은 전국 기준으로 쌓고, 집계와 서빙은 설정된 지역(처음엔 서울)만. 나중에 전국으로 열 때 백필 가능.
 
