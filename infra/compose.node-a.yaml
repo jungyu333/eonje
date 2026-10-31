@@ -1,5 +1,25 @@
 name: eonje
 
+x-airflow: &airflow
+  image: eonje-airflow:${EONJE_IMAGE_TAG:-dev}
+  restart: unless-stopped
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:?set AIRFLOW_DB_PASSWORD in .env}@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?set AIRFLOW_FERNET_KEY in .env}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"   # 켜기 전엔 스케줄로 안 돎
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
+  volumes:
+    - ../dags:/opt/airflow/dags:ro      # 개발용. 운영은 CD PR에서 GitDagBundle로
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16
@@ -55,6 +75,67 @@ services:
       postgres:
         condition: service_healthy
 
+  airflow-init:
+    <<: *airflow
+    restart: "no"
+    command: [ "airflow", "db", "migrate" ]
+
+  airflow-api-server:
+    <<: *airflow
+    # configs 파일은 읽기 전용(0444)인데 Airflow는 이 파일을 쓰기 모드(a+)로 연다.
+    # cp는 권한까지 복사해 사본도 읽기 전용이 되므로, install로 쓰기 가능한(0600) 사본을 만든다.
+    # install은 기존 파일을 지우고 새로 만들어 재시작에도 안전하다
+    environment:
+      <<: *airflow-env
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /tmp/airflow-passwords.json
+    command:
+      - bash
+      - -c
+      - |
+        install -m 600 /run/airflow/passwords.json /tmp/airflow-passwords.json
+        exec airflow api-server
+    configs:
+      - source: airflow_passwords
+        target: /run/airflow/passwords.json
+    ports:
+      - "${AIRFLOW_BIND:-127.0.0.1}:8080:8080"
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow
+    command: [ "scheduler" ]
+    env_file: ../.env                     # EONJE_* 설정을 태스크에 넘기기 위해
+    environment:
+      <<: *airflow-env
+      # 컨테이너 네트워크 안 주소로 덮어씀 (.env의 127.0.0.1은 호스트용)
+      EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD}@postgres:5432/eonje
+      EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_IMAGE_TAG: ${EONJE_IMAGE_TAG:-dev}
+    group_add:
+      - "${DOCKER_GID:-0}"                # docker.sock 접근
+    volumes:
+      - ../dags:/opt/airflow/dags:ro
+      - airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow
+    command: [ "dag-processor" ]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
 configs:
   pg_init:
     file: ./postgres/init.sh
@@ -74,7 +155,11 @@ configs:
           }
         ]
       }
+  airflow_passwords:
+    content: |
+      {"admin": "${AIRFLOW_ADMIN_PASSWORD:?set AIRFLOW_ADMIN_PASSWORD in .env}"}
 
 volumes:
   pgdata:
   seaweed:
+  airflow-logs:
