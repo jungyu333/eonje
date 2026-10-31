@@ -32,20 +32,28 @@ flowchart LR
         ML[학습·추론 태스크<br/>eonje-ml]
     end
 
-    COL -->|원본 그대로| RAW[(원본 Parquet<br/>SeaweedFS)]
+    COL -->|원본 그대로| RAW[(레이크 · 원본 Parquet<br/>SeaweedFS eonje-raw)]
     RAW -->|s3a| SPK
-    SPK -->|JDBC 스테이징 → upsert| DB[(Postgres eonje DB)]
-    DB --> ML
-    RAW --> ML
+    SPK <-->|Iceberg stg · core| DW[(DW · Iceberg 테이블<br/>SeaweedFS eonje-warehouse<br/>카탈로그: Postgres JDBC)]
+    SPK -->|JDBC 스테이징 → upsert| DB[(Postgres eonje DB<br/>mart · ops)]
+    DW --> ML
     ML -->|모델 파일| RAW
     ML -->|예측 테이블| DB
     DB --> SRV[FastAPI 조회 API<br/>eonje-api]
     SRV -->|Cloudflare Tunnel| WEB[웹 프론트<br/>지도 + 히트맵]
-    RAW -.->|분석·탐색| DUCK[Jupyter + DuckDB]
+    RAW -.->|탐색| DUCK[Jupyter + DuckDB · PyIceberg]
+    DW -.->|탐색| DUCK
 ```
 
-데이터는 한 방향으로만 흐른다: API → 원본 → 정제 → 집계 → 서빙. 역방향은 원본에서 재처리하는 경로 하나뿐이다.
-수집은 순수 Python, **수집 이후의 모든 변환·집계는 Spark 단일 엔진**이다. 10분 증분과 백필이 같은 코드를 쓴다. DuckDB는 원본 탐색용이고 변환·서빙 경로에는 없다.
+데이터는 한 방향으로만 흐른다: API → 원본(레이크) → 정제(`stg`) → 핵심(`core`: 팩트·디멘션) → 마트(`mart`) → 서빙. 역방향은 원본에서 재처리하는 경로 하나뿐이다.
+수집은 순수 Python, **수집 이후의 모든 변환·집계는 Spark 단일 엔진**이다. 10분 증분과 백필이 같은 코드를 쓴다.
+
+저장은 세 곳이고 역할이 겹치지 않는다 (2026.10.29 결정, 6장):
+- **레이크** — SeaweedFS의 원본 Parquet. 받은 그대로, 추가만
+- **DW** — SeaweedFS 위 **Iceberg 테이블**(`stg`, `core`). 분석용 정제 데이터와 팩트·디멘션. Iceberg는 테이블 형식이라 새 상시 서비스가 없고, 카탈로그는 기존 Postgres에 둔다(JDBC 카탈로그)
+- **서빙** — Postgres `eonje` DB(`mart`, `ops`). API가 읽는 집계, 10분마다 갱신되는 현재 상태, 호출 기록·품질 지표
+
+DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색용이고, 변환·서빙 경로에는 없다.
 
 ### 2.2 계층과 책임
 
@@ -54,7 +62,9 @@ flowchart LR
 | 수집 (ingest) | API 호출, 페이지 순회, 재시도, 호출 예산, 원본 저장. 순수 Python | 파싱·타입 변환·판단 |
 | 원본 (raw) | 응답을 받은 그대로 보존. 전 컬럼 문자열. 재처리의 유일한 출발점 | 수정·삭제 |
 | 정제 (transform) | 타입 변환, 중복 제거, 차원 SCD2, 전이 계산, 세션 복원, 보정. Spark | API 호출, 외부 I/O (Spark DataFrame in → DataFrame out) |
-| 집계 (aggregate) | 요일×시간대 점유, 비정상 지속, 품질 지표. 증분. Spark | 원본 접근 |
+| DW (`stg`·`core`, Iceberg) | 정제 관측, 팩트(전이·세션), 디멘션(SCD2) 보관. 추가 위주(세션만 `MERGE`). 원본에서 언제든 다시 만든다 | 서빙 조회 (API는 마트만 읽음), 잦은 행 갱신 |
+| 집계 (aggregate) | 요일×시간대 점유, 비정상 지속, 품질 지표. `core`에서 증분. Spark | 원본 접근 |
+| 마트·운영 (`mart`·`ops`, Postgres) | API용 집계, 현재 상태(`charger_state`), 호출 기록, 품질 지표 | 이력 보관 (이력은 DW) |
 | 예측 (ml) | 피처 생성(Spark), 학습(LightGBM 등), 배치 추론 → 예측 테이블 | 서빙 시점 추론 |
 | 서빙 (serve) | 집계·예측 테이블 읽기 전용 API | 쓰기, 집계 계산 |
 | 오케스트레이션 (Airflow) | 스케줄, 의존성, 재시도, 재실행 | 비즈니스 로직, 계산 분배 (Spark가 함) |
@@ -94,8 +104,9 @@ eonje/
     collect/              # 수집 흐름: 완료·지연 확인 → 예산 판단 → 페이지 순회 → 원본 run 쓰기. client·budget·storage를 조합하고, HTTP·파일시스템·DB 세션은 주입받는다
     storage/
       raw.py              # 원본 Parquet 경로 규칙, 쓰기(수집) — pyarrow + s3fs
-      spark.py            # SparkSession 생성(설정 주입), s3a 읽기, JDBC 스테이징 쓰기
-      models.py           # SQLAlchemy ORM 모델 (서비스 DB 스키마의 단일 출처. Alembic autogenerate 대상)
+      spark.py            # SparkSession 생성(설정·Iceberg 카탈로그 주입), s3a 읽기, JDBC 스테이징 쓰기
+      iceberg.py          # Iceberg 테이블 정의(스키마·파티션)의 단일 출처. 멱등한 생성·컬럼 추가로 적용 (3단계)
+      models.py           # SQLAlchemy ORM 모델 (Postgres 스키마 mart·ops의 단일 출처. Alembic autogenerate 대상)
       db.py               # 엔진·세션, 스테이징 → INSERT ... ON CONFLICT 반영
     transform/            # 순수 함수. Spark DataFrame in → DataFrame out. I/O 없음
       dims.py             # SCD2 비교·갱신 행 생성
@@ -137,8 +148,9 @@ eonje/
 - **API 어휘(`statId`, `chgerId`, `stat`…)는 `observations.py`에서 내부 어휘(`stat_id`, `charger_id`, `status_code`)로 한 번 번역**하고, 그 아래로는 내부 어휘만 쓴다. 응답 필드가 바뀌어도 수정 지점은 한 곳.
 - 설정값은 `config.py`에서만 읽는다. DAG 스케줄 간격도 거기서 가져온다 (DAG 파일은 환경변수를 직접 읽음 — eonje import 불가).
 - **`__init__.py`에는 로직을 두지 않는다.** 전부 빈 파일. re-export도 하지 않아 import는 항상 모듈까지 적는다 (`from eonje.cli.app import main`). `__main__.py`는 위임 두 줄만.
-- **DB 스키마의 단일 출처는 `models.py`.** 파이프라인 적재와 API 조회가 같은 모델을 쓴다. 대량 적재는 Spark → JDBC 스테이징 테이블 → `INSERT ... ON CONFLICT`. 행 단위 `session.add`는 금지.
-- **Spark 규칙 (처음부터 지킨다):** 데이터는 `s3a://`(SeaweedFS)와 JDBC로만 읽고 쓴다 — 로컬 경로 금지(다른 노드의 executor가 못 읽음). jar·패키지는 전부 이미지에 넣는다. 큰 데이터에 `collect()`·`toPandas()` 금지. `spark.sql.session.timeZone=Asia/Seoul`을 명시한다.
+- **스키마의 단일 출처는 저장소마다 하나.** Postgres(`mart`·`ops`)는 `models.py` — 파이프라인 적재와 API 조회가 같은 모델을 쓰고, Alembic이 여기서 만든다. Iceberg(`stg`·`core`)는 `storage/iceberg.py` — Alembic 대상이 아니므로 정의를 코드로 두고 멱등한 생성(`CREATE TABLE IF NOT EXISTS`)·컬럼 추가 잡으로 적용한다.
+- 대량 적재: Postgres는 Spark → JDBC 스테이징 테이블 → `INSERT ... ON CONFLICT`, Iceberg는 Spark `append`·`MERGE INTO`. 행 단위 `session.add`는 금지.
+- **Spark 규칙 (처음부터 지킨다):** 데이터는 `s3a://`(SeaweedFS), Iceberg 카탈로그, JDBC로만 읽고 쓴다 — 로컬 경로 금지(다른 노드의 executor가 못 읽음). **Iceberg 테이블은 카탈로그 이름으로만** 읽고 쓴다 (경로로 Parquet을 직접 쓰면 테이블 메타데이터에 안 잡힌다). jar·패키지는 전부 이미지에 넣는다. 큰 데이터에 `collect()`·`toPandas()` 금지. `spark.sql.session.timeZone=Asia/Seoul`을 명시한다.
 
 ### 2.5 런타임 토폴로지
 
@@ -189,18 +201,19 @@ flowchart TB
 ### 2.6 처리 흐름 요약
 
 ```
-[10분마다]  예산 확인 → period=10 전 페이지 수집 → raw 저장
-            → 중복 제거·버킷 → obs_status
-            → charger_state와 비교 → evt_transition, charger_state 갱신
-            → last_ts/last_te/now_ts → fact_session upsert
+[10분마다]  예산 확인 → period=10 전 페이지 수집 → raw 저장                      (레이크)
+            → 중복 제거·버킷 → stg.obs_status                                     (DW)
+            → ops.charger_state와 비교 → core.evt_transition, charger_state 갱신   (DW, 서빙)
+            → last_ts/last_te/now_ts → core.fact_session MERGE                     (DW)
 
 [1일 1회]   53페이지 수집 → raw 저장
-            → dim_station·dim_charger SCD2
+            → core.dim_station·dim_charger SCD2
             → 전체 stat vs charger_state → 보정 전이 (source=reconciled)
-            → obs_status (source=full)
+            → stg.obs_status (source=full)
+            → Iceberg 유지보수: 작은 파일 합치기, 오래된 스냅샷 정리
 
-[매시]      obs·session 증분 → agg_occupancy_hourly, agg_station_hourly
-            → agg_abnormal, 품질 지표
+[매시]      core 증분 → mart.agg_occupancy_hourly, agg_station_hourly
+            → mart.agg_abnormal, ops.quality_metrics
 ```
 
 역할: 10분 수집은 **움직임**(변경분), 일 1회 수집은 **전체 모습과 정답지**(마스터 + 보정), 매시 집계는 **사용자용 요약**. 집계는 API 호출 없음.
@@ -222,10 +235,11 @@ flowchart TB
 | 수집 저장 | pyarrow + s3fs | 수집은 Spark 없이 Parquet 쓰기만 |
 | 변환·집계 | **Apache Spark (PySpark), standalone 클러스터, client 모드** | 단일 엔진. 10분 증분과 백필이 같은 코드. 노드 추가 시 worker만 붙임 (8.2) |
 | 원본 저장 | Parquet, SeaweedFS (S3 호환, `weed server -s3`) | 수집은 s3fs, Spark는 s3a. S3 접속 키는 SeaweedFS S3 identity 설정(JSON)으로, 버킷은 `weed shell`의 `s3.bucket.create`로 만든다 |
-| 서비스 DB | PostgreSQL 16 (1 인스턴스, `airflow`·`eonje` 2 DB), SQLAlchemy 2 ORM (Declarative, `Mapped[]`), psycopg 3, Alembic | 모델이 스키마·마이그레이션·API 조회의 단일 출처. 적재는 Spark JDBC 스테이징 → `INSERT ... ON CONFLICT` |
+| DW 테이블 | **Apache Iceberg** (SeaweedFS `eonje-warehouse` 버킷, JDBC 카탈로그는 Postgres `eonje` DB) | Parquet 파일 묶음을 원자적 커밋·스키마 변경·시간 여행·`MERGE`가 되는 테이블로. 새 상시 서비스 없음. Spark가 쓰고 DuckDB·PyIceberg가 복사 없이 읽는다. SeaweedFS·Spark와의 호환은 3단계 첫 작업으로 확인 (11장) |
+| 서비스 DB | PostgreSQL 16 (1 인스턴스, `airflow`·`eonje` 2 DB), SQLAlchemy 2 ORM (Declarative, `Mapped[]`), psycopg 3, Alembic | 마트·현재 상태·운영 테이블. 모델이 Postgres 스키마·마이그레이션·API 조회의 단일 출처. 적재는 Spark JDBC 스테이징 → `INSERT ... ON CONFLICT` |
 | 예측 | LightGBM, 생존분석 등 표 데이터 모델 | 주 1회 학습(B), 매시 배치 추론 → 예측 테이블. 서빙은 테이블 조회만 (10장) |
 | 자연어 요약 | 외부 LLM API | 자체 호스팅 안 함. 생성한 문장만 저장 |
-| 분석 | Jupyter + DuckDB | 원본 Parquet 탐색·검증. 변환·서빙 경로에는 안 씀 |
+| 분석 | Jupyter + DuckDB, PyIceberg | 원본 Parquet·Iceberg 테이블 탐색·검증. 변환·서빙 경로에는 안 씀 |
 | API | FastAPI, pydantic v2, uvicorn | `/v1/` 버전 고정. 응답 스키마 = 프론트·모바일 공통 계약 |
 | 프론트 | React + TypeScript + Vite | 정적 SPA. API만 호출, 로직 없음. 배포 방식은 미결(12장) |
 | 지도 | Kakao Maps JS SDK | 국내 지도 품질·무료 쿼터. 모바일은 네이티브 SDK로 교체, 데이터는 동일 |
@@ -240,10 +254,10 @@ flowchart TB
 | CI | GitHub Actions | PR: ruff + mypy + pytest + 이미지 빌드(푸시 없음) |
 | CD | GitHub Actions + Tailscale + SSH | main: 이미지 GHCR 푸시 → 노드에 compose 배포 → 헬스체크 → `deploy` ref 이동 (8.3) |
 | 알림·관측 | A 단독: 텔레그램 봇. B 추가 후: Prometheus + Grafana + Loki (B에서 실행) | A가 죽어도 B에서 알림 발송 |
-| 백업 | 로컬: B로 `mc mirror`·`pg_dump`. 오프사이트: R2 또는 B2 | 8.5 |
+| 백업 | 로컬: B로 버킷 동기화(`weed filer.sync` 또는 rclone)·`pg_dump`. 오프사이트: R2 또는 B2 | 8.5 |
 | 시크릿 | 노드의 `.env`(서버에서 직접 관리), GitHub Secrets(배포 SSH 키, Tailscale OAuth) | 레포에는 `.env.example`만 |
 
-보류한 것: Kubernetes·k3s(compose로 시작, B 추가 시 재검토 — 8.6), Celery/Redis(LocalExecutor로 충분), dbt(변환이 Spark 코드로 충분), Kafka 등 스트리밍(10분 배치면 됨), async SQLAlchemy(읽기 전용 API에 이득 적음), pandas·DuckDB 변환 경로(Spark 단일 엔진으로 통일), 포트포워딩 + certbot(Cloudflare Tunnel로 대체), self-hosted Actions runner(public 레포에서 fork PR 코드가 서버에서 돌 위험), LLM 자체 호스팅, Postgres 인스턴스 분리(DB 분리로 충분), MinIO(2025.10 커뮤니티 Docker 이미지·바이너리 배포 중단, 2026.04 저장소 아카이브 → 보안 패치 없음. 작은 파일 대량 저장에 유리하고 유지보수가 활발한 SeaweedFS로 대체, 2026.10.28).
+보류한 것: Kubernetes·k3s(compose로 시작, B 추가 시 재검토 — 8.6), Celery/Redis(LocalExecutor로 충분), dbt(변환이 Spark 코드로 충분), Kafka 등 스트리밍(10분 배치면 됨), async SQLAlchemy(읽기 전용 API에 이득 적음), pandas·DuckDB 변환 경로(Spark 단일 엔진으로 통일), 포트포워딩 + certbot(Cloudflare Tunnel로 대체), self-hosted Actions runner(public 레포에서 fork PR 코드가 서버에서 돌 위험), LLM 자체 호스팅, Postgres 인스턴스 분리(DB 분리로 충분), MinIO(2025.10 커뮤니티 Docker 이미지·바이너리 배포 중단, 2026.04 저장소 아카이브 → 보안 패치 없음. 작은 파일 대량 저장에 유리하고 유지보수가 활발한 SeaweedFS로 대체, 2026.10.28), ClickHouse·Trino 같은 별도 조회 엔진(대화형 SQL이 필요해지면 B에 Iceberg를 읽는 엔진으로만 붙인다. 데이터는 갖지 않음, 2026.10.29), 관리형 DW(BigQuery·Snowflake — 비용, 홈서버 운영 원칙과 맞지 않음), Postgres 안의 `stg`·`core` 스키마(Iceberg 호환 확인이 실패할 때의 전환 경로, 11장).
 
 ## 4. 데이터 소스
 
