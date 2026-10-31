@@ -40,6 +40,7 @@ check: lint typecheck test   ## CI와 동일한 전체 검사
 
 build:           ## eonje 이미지 빌드
 	docker build -f docker/tasks/collector/Dockerfile -t eonje-collector:$(TAG) .
+	docker build -f docker/airflow/Dockerfile -t eonje-airflow:$(TAG) docker/airflow
 
 run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
 	$(if $(and $(JOB),$(RUN_ID),$(RUN_AFTER)),,$(error usage: make run JOB=<job> RUN_ID=<id> RUN_AFTER=<ISO 8601 with offset like 2026-10-28T01:10:00+00:00>))
