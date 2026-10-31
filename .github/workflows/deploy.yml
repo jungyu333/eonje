@@ -67,12 +67,13 @@ jobs:
 
       - name: copy compose files
         run: |
-          ssh -o BatchMode=yes "$REMOTE" 'mkdir -p eonje/infra/postgres'
+          ssh -o BatchMode=yes "$REMOTE" 'mkdir -p eonje/infra/postgres eonje/infra/deploy'
           scp -o BatchMode=yes infra/compose.node-a.yaml infra/compose.node-a.prod.yaml "$REMOTE":eonje/infra/
           scp -o BatchMode=yes infra/postgres/init.sh "$REMOTE":eonje/infra/postgres/
+          scp -o BatchMode=yes infra/deploy/node-a.sh "$REMOTE":eonje/infra/deploy/
 
       - name: deploy
-        run: ssh -o BatchMode=yes "$REMOTE" "bash -s -- $SHA" < infra/deploy/node-a.sh
+        run: ssh -o BatchMode=yes "$REMOTE" "bash eonje/infra/deploy/node-a.sh $SHA"
 
       # 배포가 성공한 뒤에만 옮긴다. 서버의 GitDagBundle이 이 브랜치의 dags/를 가져간다
       # 롤백 때는 과거 커밋으로 되돌리므로 force

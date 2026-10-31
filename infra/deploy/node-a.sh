@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # eonje-a에서 스택을 주어진 커밋 sha의 이미지로 갱신한다.
-# CD가 deploy 계정으로 실행한다:  ssh deploy@eonje-a "bash -s -- <sha>" < infra/deploy/node-a.sh
+# CD가 이 파일을 서버에 복사한 뒤 deploy 계정으로 실행한다:  ssh deploy@eonje-a "bash eonje/infra/deploy/node-a.sh <sha>"
+# (bash -s로 표준입력에 흘려 넣지 않는다: docker compose run/exec가 남은 스크립트를 표준입력으로 먹어 버린다)
 #
 # 순서: 이미지 받기 → 저장소 기동 → 마이그레이션 → 버킷 → 전체 기동(헬스체크 대기)
 # 마이그레이션이나 기동이 실패하면 여기서 멈추고 image.env는 직전 성공 sha를 유지한다.
@@ -21,10 +22,10 @@ compose=(docker compose
 # collector는 tools 프로필(migrate)에서만 쓰여 기본 pull 대상이 아니다
 "${compose[@]}" --profile tools pull
 "${compose[@]}" up -d --wait postgres seaweedfs
-"${compose[@]}" run --rm migrate
+"${compose[@]}" run --rm -T migrate < /dev/null
 
 bucket_out=$("${compose[@]}" exec -T seaweedfs sh -c \
-  'echo "s3.bucket.create -name ${EONJE_RAW_BUCKET:-eonje-raw}" | weed shell' 2>&1)
+  'echo "s3.bucket.create -name ${EONJE_RAW_BUCKET:-eonje-raw}" | weed shell' 2>&1 < /dev/null)
 echo "$bucket_out"
 case "$bucket_out" in
   *"created bucket"*|*"already exists"*) ;;

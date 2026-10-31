@@ -520,8 +520,8 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - **CD** (`.github/workflows/deploy.yml`, CI가 이미지 푸시 뒤 호출. 수동 실행도 가능):
   1. sha 형식과 그 sha의 이미지가 GHCR에 있는지 확인
   2. 러너가 Tailscale 임시 노드(`tag:ci`, OAuth 클라이언트)로 tailnet에 접속. ACL은 `tag:ci → eonje-a:22`만 허용하고, 저장할 때마다 정책 테스트로 확인한다
-  3. `deploy` 계정으로 compose 파일 두 개와 `init.sh`를 `scp`
-  4. `infra/deploy/node-a.sh <sha>`를 ssh로 실행: 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → `migrate`(Alembic, 3단계부터 `ensure-iceberg-tables`도) → 원본 버킷 확인 → `up -d --wait`(헬스체크 대기). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지
+  3. `deploy` 계정으로 compose 파일 두 개, `init.sh`, 배포 스크립트를 `scp`
+  4. 서버에 복사한 `infra/deploy/node-a.sh <sha>`를 ssh로 실행(표준입력으로 흘려 넣지 않음: `docker compose run`이 남은 스크립트를 먹는다): 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → `migrate`(Alembic, 3단계부터 `ensure-iceberg-tables`도) → 원본 버킷 확인 → `up -d --wait`(헬스체크 대기). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지
   5. 성공하면 `deploy` 브랜치를 `<sha>`로 force 이동 → GitDagBundle이 새 DAG를 가져감 (`refresh_interval` 60초)
 - **DAG 배포는 GitDagBundle**(`compose.node-a.prod.yaml`: `repo_url` 공개 레포, `tracking_ref=deploy`, `subdir=dags`, 연결·토큰 없음). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 배포 성공 후 브랜치를 옮겨 순서를 보장한다. 운영에서도 DAG는 멈춘 상태로 등록되므로, 첫 배포 후 사람이 한 번 켜야 수집이 시작된다
 - 시크릿 (GitHub Actions): `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`(배포 전용 키, 서버 `authorized_keys`에서 `from="100.64.0.0/10"`과 포워딩 금지로 제한), `DEPLOY_KNOWN_HOSTS`(eonje-a 호스트 키, Tailscale 주소 기준)
