@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -69,3 +69,6 @@ buckets:         ## 원본 버킷 생성 (이미 있으면 성공으로 봄)
 
 migrate-image:   ## 이미지 안의 마이그레이션 적용 (CD와 같은 경로). make build 먼저
 	$(COMPOSE) run --rm migrate
+
+airflow-recreate: ## .env 변경(비밀번호 등)을 Airflow api-server에 반영
+	$(COMPOSE) up -d --force-recreate airflow-api-server
