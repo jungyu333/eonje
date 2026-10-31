@@ -24,7 +24,8 @@ eonje/        # Pure Python package. Never imports airflow.
   transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O.
   codes/      # Versioned code tables (YAML) + loader
 api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.models.
-dags/         # Thin Airflow DAGs. @task.docker calling eonje.cli only. Loaded via GitDagBundle (deploy ref).
+dags/         # Thin Airflow DAGs (a plain folder, no __init__.py). DockerOperator running eonje.cli in a runtime image;
+              #   EONJE_* settings are read at execution time and passed as private_environment. GitDagBundle in prod.
 docker/       # One Dockerfile per runtime image: tasks/collector, tasks/spark, tasks/ml, api
 infra/        # compose.node-a.yaml, compose.node-b.yaml, postgres/init.sh, migrations/ (Alembic), .env.example
 tests/        # unit/ (no Airflow, no network; Spark via local session), fixtures/ (real API responses, keys removed)
@@ -97,7 +98,7 @@ docs/         # design.md, requirements.md
   `eonje-api`).
   Same entrypoint everywhere: `python -m eonje.cli <job> --run-id <id> --run-after <iso8601>`. Airflow's image never contains eonje or Spark.
 - Images are pushed to GHCR tagged with the git sha. **No code on servers**: a node holds only `compose.yaml`, `.env`,
-  and volumes. DAGs reach Airflow via GitDagBundle tracking the `deploy` ref, which CD moves after images are pushed.
+  and volumes; nobody runs `git pull` or `pip install` there. DAGs reach Airflow via GitDagBundle tracking the `deploy` ref, which CD moves after images are pushed.
 - Node A (always on): Airflow, Postgres, SeaweedFS (S3), collector, API, cloudflared, Spark master (+worker until B).
   Node B (added on measured need): Spark worker, monitoring, local backup, model training. Stateful services stay on A.
 - No inbound ports: public traffic via Cloudflare Tunnel, admin access via Tailscale.

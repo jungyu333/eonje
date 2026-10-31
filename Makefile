@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -40,6 +40,7 @@ check: lint typecheck test   ## CI와 동일한 전체 검사
 
 build:           ## eonje 이미지 빌드
 	docker build -f docker/tasks/collector/Dockerfile -t eonje-collector:$(TAG) .
+	docker build -f docker/airflow/Dockerfile -t eonje-airflow:$(TAG) docker/airflow
 
 run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
 	$(if $(and $(JOB),$(RUN_ID),$(RUN_AFTER)),,$(error usage: make run JOB=<job> RUN_ID=<id> RUN_AFTER=<ISO 8601 with offset like 2026-10-28T01:10:00+00:00>))
@@ -65,3 +66,20 @@ migration-check: ## models.py와 마이그레이션이 일치하는지 (DB 필�
 
 buckets:         ## 원본 버킷 생성 (이미 있으면 성공으로 봄)
 	$(COMPOSE) exec -T seaweedfs sh -c 'b="$${EONJE_RAW_BUCKET:-eonje-raw}"; out=$$(echo "s3.bucket.create -name $$b" | weed shell 2>&1); echo "$$out"; case "$$out" in *"created bucket"*|*"already exists"*) exit 0 ;; *) exit 1 ;; esac'
+
+migrate-image:   ## 이미지 안의 마이그레이션 적용 (CD와 같은 경로). make build 먼저
+	$(COMPOSE) run --rm migrate
+
+airflow-recreate: ## .env 변경(비밀번호 등)을 Airflow api-server에 반영
+	$(COMPOSE) up -d --force-recreate airflow-api-server
+
+dags-check:      ## Airflow 컨테이너에서 DAG import 오류 확인 (make up 필요)
+	$(COMPOSE) exec airflow-dag-processor airflow dags list-import-errors
+
+dag-test:        ## DAG를 켜지 않고 한 번 실행. 예: make dag-test DAG=ev_status_10min
+	$(if $(DAG),,$(error usage: make dag-test DAG=<dag_id>))
+	$(COMPOSE) exec airflow-scheduler airflow dags test $(DAG)
+
+dag-pause:       ## DAG 끄기 (실수로 켰을 때). 예: make dag-pause DAG=ev_status_10min
+	$(if $(DAG),,$(error usage: make dag-pause DAG=<dag_id>))
+	$(COMPOSE) exec airflow-scheduler airflow dags pause $(DAG)

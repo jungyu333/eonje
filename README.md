@@ -79,9 +79,43 @@ make run JOB=fetch-delta RUN_ID=manual__1 RUN_AFTER=$(date -u +%Y-%m-%dT%H:%M:%S
 
 DB 테스트는 `make up` 상태에서 `make test-db`로 돈다 (세션마다 임시 스키마를 만들고 지운다).
 
+## Airflow로 돌려 보기
+
+`make up`은 Airflow(api-server, scheduler, dag-processor)도 함께 띄운다. 먼저 `.env`에 Airflow 값을 채운다.
+
+```dotenv
+AIRFLOW_ADMIN_PASSWORD=<UI 비밀번호. " 와 \ 는 쓰지 않는다>
+AIRFLOW_FERNET_KEY=<python -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())">
+AIRFLOW_JWT_SECRET=<python -c "import secrets; print(secrets.token_urlsafe(32))">
+DOCKER_GID=0   # Docker Desktop. Linux는 getent group docker | cut -d: -f3
+```
+
+```bash
+make build        # eonje-collector:dev, eonje-airflow:dev
+make up
+make dags-check   # DAG import 오류 확인. "No data found"면 정상
+```
+
+- UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
+- `ev_status_10min`은 **멈춘 상태(paused)로 등록**되고, 개발 PC에서는 켜지 않는다. 켜면 10분마다 수집한다
+- 한 번 실행해 보려면 `airflow dags test`를 쓴다. 스케줄러를 거치지 않고 그 자리에서 끝까지 돌려서, DAG가 멈춰 있어도 된다
+
+  ```bash
+  make dag-test DAG=ev_status_10min
+  ```
+
+  UI의 Trigger나 `airflow dags trigger`는 쓰지 않는다. 멈춘 DAG의 run은 실행되지 않고 대기하고,
+  UI Trigger는 기본으로 DAG를 함께 켠다(켜지는 순간 직전 스케줄 구간 run도 하나 더 돈다)
+- 켜졌다면 끈다: `make dag-pause DAG=ev_status_10min`
+- 개발 PC와 운영 노드는 같은 서비스 키, 즉 같은 하루 한도를 쓰지만 호출 기록은 각자의 DB에 있어 서로의 호출을 모른다.
+  운영 수집이 돌기 시작하면 개발 PC `.env`의 `EONJE_API_DAILY_LIMIT`을 작게(예: 30) 두거나 개발용 키를 따로 쓴다
+- `AIRFLOW_ADMIN_PASSWORD`를 바꾸면 `make airflow-recreate`. 비밀번호 파일 내용만 바뀐 것은 `make up`이 반영하지 않는다
+- DAG는 `dags/`가 마운트돼 있어 저장하면 바로 다시 읽힌다(이미지 재빌드 불필요). 태스크 코드(`eonje/`)를 바꾸면 `make build`
+- 이미지 안의 마이그레이션을 운영과 같은 방식으로 적용하려면 `make migrate-image`
+
 ## 상태
 
-초기 구축 중. 수집기부터 올린다.
+수집기와 Airflow DAG(`ev_status_10min`)가 로컬에서 동작한다. 다음은 운영 노드 배포(CD).
 
 ## 데이터 출처
 

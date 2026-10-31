@@ -44,6 +44,7 @@ jobs:
           docker run --rm eonje-collector:ci --help > help.txt
           cat help.txt
           grep -q fetch-delta help.txt
+          docker run --rm --entrypoint alembic eonje-collector:ci heads
 
   db:
     runs-on: ubuntu-latest

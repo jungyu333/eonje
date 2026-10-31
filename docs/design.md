@@ -81,10 +81,13 @@ DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색�
   | `eonje-ml` | `docker/tasks/ml/` | eonje + LightGBM 등 | 학습·배치 추론 (9단계) |
   | `eonje-api` | `docker/api/` | eonje + FastAPI | 조회 API |
 
-- 태스크는 `@task.docker(image="ghcr.io/jungyu333/eonje-<runtime>:<sha>", command=["python", "-m", "eonje.cli", "<job>", "--run-id", <run_id>, "--run-after", <dag_run.run_after>])`. 진입점은 모든 태스크 이미지에서 같다. `--run-after`(ISO 8601, 오프셋 필수)가 수집 시각과 날짜 파티션을 정하므로 둘 다 필수다
+- 태스크는 `DockerOperator(image="<EONJE_IMAGE_REPO>-<runtime>:<EONJE_IMAGE_TAG>", command=["<job>", "--run-id", "{{ run_id }}", "--run-after", "{{ dag_run.run_after.isoformat() }}"])`. 이미지 진입점이 `python -m eonje.cli`라 명령에는 job과 인자만 준다. `--run-after`(ISO 8601, 오프셋 필수)가 수집 시각과 날짜 파티션을 정하므로 둘 다 필수다
+  - `@task.docker`가 아니라 `DockerOperator`인 이유: `@task.docker`는 DAG 파일의 Python 함수를 직렬화해 컨테이너에서 실행한다. 우리 태스크는 이미지 안의 `eonje` 패키지와 CLI를 그대로 실행하므로 이미지 + 명령을 받는 `DockerOperator`가 맞다 (2026.10.31)
+  - 설정 전달: `EONJE_*` 값(서비스 키 포함)은 scheduler 컨테이너만 `.env`에서 받고, 태스크가 **실행될 때** 그 환경에서 읽어 `private_environment`로 넘긴다(`dags/`의 `EonjeTask`). DAG 파싱 때 넘기면 직렬화된 DAG로 Airflow DB에 남는다. 컨테이너 네트워크 안 주소(`postgres`, `seaweedfs`)는 compose가 scheduler 환경에서 덮어쓴다
+  - `skip_on_exit_code=99`(예산 소진·늦은 run은 skipped), `do_xcom_push=False`(컨테이너 마지막 로그 줄을 XCom에 쌓지 않음), `mount_tmp_dir=False`
 - 태스크 간 데이터는 XCom이 아니라 SeaweedFS·DB를 거친다. XCom은 run_id·건수·페이지 상한 같은 작은 값만
 - 네트워크: 수집 태스크는 compose 네트워크에 붙어 Postgres·SeaweedFS에 접근. Spark 드라이버 태스크는 `network_mode: host` (다른 노드의 executor가 드라이버에 접속해야 함, 8.2)
-- 원격 실행: 모델 학습 등 Spark가 아닌 무거운 태스크는 `@task.docker(docker_url=<B>)`로 B 노드의 Docker에서 실행 (8.1)
+- 원격 실행: 모델 학습 등 Spark가 아닌 무거운 태스크는 `DockerOperator(docker_url=<B>)`로 B 노드의 Docker에서 실행 (8.1)
 - 효과: Airflow와 파이프라인 의존성 완전 분리. "`eonje`는 Airflow 없이 돈다"는 경계가 런타임에서 강제됨. 이미지가 런타임별이라 수집 이미지에 Spark가 없고, Spark 이미지 크기가 수집 배포를 느리게 하지 않는다
 - 비용: scheduler에 `/var/run/docker.sock` 마운트(호스트 root 상당 권한 — 1인 홈서버에서 감수), 태스크당 컨테이너 기동 수 초(10분 주기엔 무시)
 
@@ -117,7 +120,7 @@ eonje/
       aggregate.py        # 점유·비정상·품질 지표
     codes/                # 코드표 (버전별 YAML) + 로더
   api/                    # FastAPI. 집계·예측 테이블 read-only. eonje.storage.models를 그대로 조회
-  dags/                   # 얇은 DAG. @task.docker로 eonje.cli 호출만. Airflow가 GitDagBundle로 직접 가져감 (서버에 마운트 안 함)
+  dags/                   # 얇은 DAG. DockerOperator로 eonje.cli 호출만. 패키지가 아닌 폴더(__init__.py 없음). 개발 PC는 마운트, 운영은 GitDagBundle
     ev_master_daily.py
     ev_status_10min.py
     ev_transform_10min.py # 4단계 (분리 후보, 7장)
@@ -230,9 +233,9 @@ flowchart TB
 |---|---|---|
 | 언어 | Python 3.11 (파이프라인·API), TypeScript (프론트) | |
 | 패키지 관리 | uv (`pyproject.toml`, lock) | 설치 빠름. 모든 이미지 빌드에 사용 |
-| 오케스트레이션 | Apache Airflow 3.x 공식 이미지, LocalExecutor, TaskFlow `@task.docker` | Airflow는 지휘만. 계산 분배는 Spark |
+| 오케스트레이션 | Apache Airflow 3.3 공식 이미지 + docker·git provider를 constraints로 고정한 얇은 이미지(`docker/airflow/`), LocalExecutor | Airflow는 지휘만. 계산 분배는 Spark. 로그인은 SimpleAuthManager(비밀번호는 `.env`) |
 | DAG 배포 | Airflow 3 DAG bundle (`GitDagBundle`) | Git `deploy` ref를 추적. run마다 DAG 버전 기록. 서버에 DAG 파일을 두지 않음 (8.3) |
-| 태스크 실행 | Docker provider (`@task.docker`), 런타임별 이미지 | 기본은 A의 Docker, 학습 등은 `docker_url`로 B |
+| 태스크 실행 | Docker provider `DockerOperator`, 런타임별 이미지 | 기본은 A의 Docker, 학습 등은 `docker_url`로 B |
 | HTTP 클라이언트 | httpx + tenacity | 동기로 충분(페이지 순차). 재시도·백오프는 tenacity |
 | 설정 | pydantic-settings | `EONJE_` 환경변수 → 타입 검증된 설정 객체. `config.py` 하나 |
 | 수집 저장 | pyarrow + s3fs | 수집은 Spark 없이 Parquet 쓰기만 |
@@ -250,7 +253,7 @@ flowchart TB
 | 공개·TLS | Cloudflare Tunnel + Cloudflare DNS (무료 플랜) | 포트포워딩·고정 IP·인증서 관리 없음. 집 IP 비노출, 기본 DDoS 방어 |
 | 관리 접근 | Tailscale | SSH, Airflow·Spark·SeaweedFS·Grafana UI. CD 러너도 tailnet으로 접속 |
 | 컨테이너 | Docker, docker compose (노드별 파일) | 개발 PC = 노드 A 구성 |
-| 이미지 레지스트리 | GHCR (`ghcr.io/jungyu333/eonje-*:<git-sha>`) | Actions `GITHUB_TOKEN`으로 푸시. 공개 이미지라 서버 pull에 인증 불필요 |
+| 이미지 레지스트리 | GHCR (`ghcr.io/jungyu333/eonje-*:<git-sha>`) | Actions `GITHUB_TOKEN`으로 푸시. 공개 이미지라 서버 pull에 인증 불필요. compose와 DAG는 이미지 이름을 `${EONJE_IMAGE_REPO}-<runtime>:${EONJE_IMAGE_TAG}`로 만든다: 개발 PC `eonje`·`dev`(`make build`), 운영 `ghcr.io/jungyu333/eonje`·git sha |
 | 운영 노드 | 집 미니PC (A 상시, B는 부족 신호 시 추가) | 8.1 |
 | 테스트 | pytest, 실제 응답 fixture, 로컬 SparkSession | `transform/`은 fixture로 커버. DB 테스트는 `db` 마커 + Actions `services:` Postgres |
 | 품질 | ruff (lint·format), mypy strict, pre-commit | pre-commit 훅: ruff(프로젝트 venv 버전), ruff-format, EOF·공백·YAML·TOML 검사, 대용량 파일·개인키 차단. mypy는 CI |
@@ -406,7 +409,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 ## 7. DAG 구성
 
-Airflow 3, LocalExecutor, TaskFlow `@task.docker`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id> --run-after <dag_run.run_after>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
+Airflow 3, LocalExecutor, `DockerOperator`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id> --run-after <dag_run.run_after>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
 
 Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나만 돈다. 변환은 **워터마크** 방식이다: 자기 run의 원본만이 아니라 아직 처리하지 않은 원본 run을 전부 처리한다. 그래서 변환이 멈췄다 살아나면 자동으로 따라잡고, 수집은 변환 상태와 무관하게 계속된다.
 
@@ -496,7 +499,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 ### 8.3 배포 (CI/CD)
 
-**서버에 코드를 두지 않는다.** 노드에는 실행 명세와 비밀값, 데이터만 있다.
+**서버에 코드를 두지 않는다.** 노드에는 실행 명세와 비밀값, 데이터만 있다. 정확히는 "사람이 서버에서 코드를 관리하지 않는다"는 뜻이다: `git pull`·`pip install`을 하지 않는다. 태스크 코드는 이미지에 들어 있고, DAG는 GitDagBundle이 Airflow 볼륨에 받아 두지만 그 버전은 CD가 옮기는 `deploy` ref가 정한다
 
 ```
 ~/eonje/
@@ -520,6 +523,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - 롤백: `workflow_dispatch`로 이전 sha를 다시 배포
 - self-hosted runner는 쓰지 않는다 (public 레포)
 - 단계: CI는 골격 직후 PR, CD는 수집기 배포(2단계) PR
+- CD PR에서 정할 것: 서버 배치를 개발 PC와 같게(`~/eonje/infra/compose.node-a.yaml` + `~/eonje/.env`) 둘지 — compose가 `../.env`(scheduler `env_file`)와 `../dags`(개발용 마운트)를 상대 경로로 쓴다. 운영은 `dags/` 마운트 대신 GitDagBundle
 
 ### 8.4 공개와 접근
 

@@ -17,7 +17,8 @@ Review the current branch against `main` following the project's boundary and da
 
 ### Boundaries
 - [ ] No `import airflow` outside `dags/`
-- [ ] `dags/` does not import `eonje`; DAG files only wire `@task.docker` calls to `eonje.cli`
+- [ ] `dags/` does not import `eonje`; DAG files only wire `DockerOperator` calls to `eonje.cli`, and secrets reach the
+      task as `private_environment` read at execution time (never at parse time)
 - [ ] No HTTP, DB, or filesystem access in `transform/`
 - [ ] No business logic in `api/` — it only queries aggregate tables and shapes responses
 - [ ] API field names (`statId`, `chgerId`, `stat`, ...) appear only in `client/` and `transform/observations.py`
