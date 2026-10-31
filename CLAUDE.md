@@ -39,7 +39,7 @@ docs/         # design.md, requirements.md
   SparkSession creation, s3a reads, and JDBC writes belong in `storage/`.
 - **API vocabulary (`statId`, `chgerId`, `stat`, ...) is translated once in `transform/observations.py`** into internal
   names (`stat_id`, `charger_id`, `status_code`). Everything downstream uses internal names only.
-- **Three stores, one role each:** raw Parquet in SeaweedFS (lake, append-only), Iceberg `stg`/`core` on SeaweedFS
+- **Three stores, one role each:** raw Parquet in SeaweedFS (lake; a completed run is immutable), Iceberg `stg`/`core` on SeaweedFS
   (DW: observations, facts, SCD2 dimensions), Postgres `mart`/`ops` (serving aggregates, current state, call log,
   quality metrics). `api/` reads Postgres only.
 - **One schema source per store.** Postgres: `storage/models.py` (Alembic autogenerates from it; `api/` queries the same
@@ -61,8 +61,12 @@ docs/         # design.md, requirements.md
   present) is never fetched again, because the API only serves the last N minutes and a refetch would relabel new data
   and delete the original; only an incomplete run is cleared and fetched again. `stg.obs_status` and `core.evt_transition`: ignore on conflict (facts are append-only; corrections are new rows).
   `core.fact_session`: `MERGE`. Aggregates: delete the window, recompute.
+- **Transforms keep one watermark per task** (`ops.transform_watermark`). Each task commits its own writes, then its
+  own watermark; an upstream task's watermark caps what the downstream task may process. Raw runs (delta and full) are
+  processed in `collected_at` order by the same flow, so reconciliation never jumps ahead of pending deltas.
 - **Cross-store writes go Iceberg first, Postgres last.** Transition derivation commits `core.evt_transition` (MERGE),
-  then updates `ops.charger_state` and the transform watermark in one Postgres transaction. Never the reverse: a failed
+  then updates `ops.charger_state` and its watermark in one Postgres transaction. Only that task writes
+  `charger_state`, under a Postgres advisory lock. Never the reverse: a failed
   Iceberg commit after a state update loses transitions for good. `charger_state` is a derived cache rebuildable from
   `core.evt_transition`.
 - `statUpdDt` is **not** a transition time (operator-dependent heartbeat). Transitions are derived by comparing against
@@ -81,6 +85,8 @@ docs/         # design.md, requirements.md
 - **Iceberg tables only by catalog name** (`lake.stg.obs_status`), never by writing Parquet to their path. Partition by a
   KST date column per table (`*_date`: `observed_date`, `at_date`, `started_date`), not `days()` (UTC). Tables are
   compacted and snapshots expired daily.
+- **`MERGE` conditions include the partition column range** taken from the source (`t.observed_date IN (...)` plus the
+  key). Matching on the key alone scans the whole, ever-growing table every run.
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
 - jars and packages are baked into the `eonje-spark` image; never fetched at runtime.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
