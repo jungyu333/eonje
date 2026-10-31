@@ -114,9 +114,25 @@ make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있�
 - DAG는 `dags/`가 마운트돼 있어 저장하면 바로 다시 읽힌다(이미지 재빌드 불필요). 태스크 코드(`eonje/`)를 바꾸면 `make build`
 - 이미지 안의 마이그레이션을 운영과 같은 방식으로 적용하려면 `make migrate-image`
 
+## 운영 노드 (eonje-a)
+
+main에 머지되면 CI가 이미지를 GHCR에 푸시하고 eonje-a에 배포한다 ([설계 §8.3](docs/design.md#83-배포-cicd)).
+서버 `~/eonje/.env`는 사람이 관리하고, 나머지는 CD가 덮어쓴다.
+
+| 대상 | 접근 |
+|---|---|
+| Airflow UI | tailnet 안에서 `http://eonje-a:8080` |
+| Postgres | SSH 터널 (`ssh -N -L 15432:127.0.0.1:5432 eonje-a` 또는 PyCharm Database의 SSH 탭). 읽기 전용으로 연결 |
+| SeaweedFS S3 | SSH 터널 (`-L 18333:127.0.0.1:8333`, Big Data Tools의 터널 옵션). endpoint `127.0.0.1`, path-style |
+| SeaweedFS filer UI | 필요할 때만 `-L 18888:127.0.0.1:8888` → `http://localhost:18888` (로그인 없이 삭제 가능하니 주의) |
+
+- 배포 계정은 `deploy`(`ssh eonje-deploy`), 관리·터널은 개인 계정(`ssh eonje-a`). `deploy` 키는 포워딩이 막혀 터널에 못 쓴다
+- 롤백: Actions → deploy → Run workflow에 `~/eonje/image.env.prev`의 sha
+- 운영에서도 DAG는 멈춘 상태로 등록된다. 첫 배포 후 UI에서 한 번 켠다
+
 ## 상태
 
-수집기와 Airflow DAG(`ev_status_10min`)가 로컬에서 동작한다. 다음은 운영 노드 배포(CD).
+수집기·Airflow DAG·CD까지 갖췄다. 운영 노드(eonje-a)에서 10분 수집을 시작한다.
 
 ## 데이터 출처
 
