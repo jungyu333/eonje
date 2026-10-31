@@ -57,6 +57,8 @@ jobs:
 
       # Throwaway credentials for a Postgres that lives only for this job.
       # No API key: DB tests load DatabaseSettings only.
+      # compose interpolates every service even when only postgres starts, so the
+      # Airflow and S3 values must be present too (dummies; those services never run here).
       - name: write .env for ci
         run: |
           cat > .env <<'EOF'
@@ -68,6 +70,9 @@ jobs:
           EONJE_S3_ACCESS_KEY=ci-s3-access
           EONJE_S3_SECRET_KEY=ci-s3-secret
           EONJE_DATABASE_URL=postgresql+psycopg://eonje:ci-eonje@127.0.0.1:5432/eonje
+          AIRFLOW_ADMIN_PASSWORD=ci-airflow-admin
+          AIRFLOW_FERNET_KEY=ci-unused-fernet-key
+          AIRFLOW_JWT_SECRET=ci-unused-jwt-secret
           EOF
 
       # Same compose file and init.sh as the dev PC and node A.
