@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -72,3 +72,6 @@ migrate-image:   ## 이미지 안의 마이그레이션 적용 (CD와 같은 경
 
 airflow-recreate: ## .env 변경(비밀번호 등)을 Airflow api-server에 반영
 	$(COMPOSE) up -d --force-recreate airflow-api-server
+
+dags-check:      ## Airflow 컨테이너에서 DAG import 오류 확인 (make up 필요)
+	$(COMPOSE) exec airflow-dag-processor airflow dags list-import-errors
