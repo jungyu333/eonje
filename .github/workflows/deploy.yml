@@ -1,0 +1,81 @@
+name: deploy
+
+# 두 가지로 실행된다
+#  - CI가 main에서 이미지 푸시를 마친 뒤 호출 (workflow_call)
+#  - 롤백·재배포: Actions 탭에서 sha를 넣어 수동 실행 (workflow_dispatch)
+#    직전 버전은 서버의 ~/eonje/image.env.prev에 있다
+on:
+  workflow_call:
+    inputs:
+      sha:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "배포할 커밋의 전체 sha (그 sha의 이미지가 GHCR에 있어야 함)"
+        type: string
+        required: true
+
+permissions:
+  contents: write   # deploy 브랜치 이동
+
+env:
+  SHA: ${{ inputs.sha }}
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  REMOTE: deploy@100.123.91.19   # eonje-a의 Tailscale 주소. DEPLOY_KNOWN_HOSTS도 이 주소 기준
+
+jobs:
+  node-a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 배포는 한 번에 하나, 순서대로. 진행 중인 배포를 취소하지 않는다
+    concurrency:
+      group: deploy-node-a
+      cancel-in-progress: false
+    steps:
+      - name: check sha and images
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "full 40-char commit sha required: $SHA"; exit 1; }
+          for image in eonje-collector eonje-airflow; do
+            docker manifest inspect "$REGISTRY/$image:$SHA" > /dev/null \
+              || { echo "missing $REGISTRY/$image:$SHA"; exit 1; }
+          done
+
+      # compose 파일과 배포 스크립트를 그 sha 기준으로 쓴다
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      # 러너를 tag:ci 임시 노드로 tailnet에 붙인다. ACL상 eonje-a:22만 열려 있다
+      - uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: ssh key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -o BatchMode=yes "$REMOTE" true
+
+      - name: copy compose files
+        run: |
+          ssh -o BatchMode=yes "$REMOTE" 'mkdir -p eonje/infra/postgres eonje/infra/deploy'
+          scp -o BatchMode=yes infra/compose.node-a.yaml infra/compose.node-a.prod.yaml "$REMOTE":eonje/infra/
+          scp -o BatchMode=yes infra/postgres/init.sh "$REMOTE":eonje/infra/postgres/
+          scp -o BatchMode=yes infra/deploy/node-a.sh "$REMOTE":eonje/infra/deploy/
+
+      - name: deploy
+        run: ssh -o BatchMode=yes "$REMOTE" "bash eonje/infra/deploy/node-a.sh $SHA"
+
+      # 배포가 성공한 뒤에만 옮긴다. 서버의 GitDagBundle이 이 브랜치의 dags/를 가져간다
+      # 롤백 때는 과거 커밋으로 되돌리므로 force
+      - name: move deploy branch
+        run: git push --force origin "$SHA:refs/heads/deploy"

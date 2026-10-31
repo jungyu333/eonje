@@ -1,0 +1,25 @@
+# 운영(eonje-a) 전용 덮어쓰기. CD가 compose.node-a.yaml 뒤에 함께 지정한다:
+#   docker compose -f compose.node-a.yaml -f compose.node-a.prod.yaml ...
+# 개발 PC는 이 파일을 쓰지 않는다 (dags/ 폴더 마운트 = LocalDagBundle).
+#
+# 운영 DAG는 GitDagBundle이 GitHub의 deploy 브랜치에서 가져온다. CD가 이미지 배포에
+# 성공한 뒤에만 deploy 브랜치를 옮기므로, 새 DAG가 아직 없는 이미지·테이블을 부르지 않는다.
+# 공개 레포라 연결(git_conn_id) 없이 repo_url만 준다. 토큰을 URL에 넣지 않는다.
+
+x-dag-bundles: &dag-bundles
+  AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST: >-
+    [{"name": "eonje",
+      "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
+      "kwargs": {"repo_url": "https://github.com/jungyu333/eonje.git",
+                 "tracking_ref": "deploy",
+                 "subdir": "dags",
+                 "refresh_interval": 60}}]
+
+# environment 맵은 기본 파일과 키 단위로 합쳐진다 (기존 값은 그대로, 이 키만 추가)
+services:
+  airflow-dag-processor:
+    environment: *dag-bundles
+  airflow-scheduler:
+    environment: *dag-bundles
+  airflow-api-server:
+    environment: *dag-bundles

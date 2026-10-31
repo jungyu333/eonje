@@ -502,29 +502,32 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 **서버에 코드를 두지 않는다.** 노드에는 실행 명세와 비밀값, 데이터만 있다. 정확히는 "사람이 서버에서 코드를 관리하지 않는다"는 뜻이다: `git pull`·`pip install`을 하지 않는다. 태스크 코드는 이미지에 들어 있고, DAG는 GitDagBundle이 Airflow 볼륨에 받아 두지만 그 버전은 CD가 옮기는 `deploy` ref가 정한다
 
 ```
-~/eonje/
-  compose.yaml   # CD가 배포 때마다 덮어씀
-  .env           # 서비스 키·비밀번호. 서버에서 직접 관리
-+ docker 볼륨     # Postgres·SeaweedFS 데이터
+/home/deploy/eonje/            # 배포 전용 사용자 deploy (docker 그룹, 비밀번호 잠금, 키 로그인만)
+  .env                         # 서비스 키·비밀번호. 서버에서 사람이 직접 관리 (chmod 600)
+  image.env                    # EONJE_IMAGE_TAG=<sha>. CD가 성공한 배포만 기록
+  image.env.prev               # 직전 성공 sha (롤백용)
+  infra/compose.node-a.yaml    # CD가 배포마다 덮어씀
+  infra/compose.node-a.prod.yaml  # 운영 덮어쓰기 (GitDagBundle)
+  infra/postgres/init.sh       # compose configs가 참조
++ docker 볼륨                   # Postgres·SeaweedFS·Airflow 로그
 ```
 
+배치를 개발 PC와 같게 둔 이유: compose가 `../.env`(scheduler `env_file`)와 `../dags`를 상대 경로로 쓴다. 운영에서 `dags/`는 빈 폴더이고 DAG는 GitDagBundle로 온다.
+
 - 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
-- **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres)
+- **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres). PR에서만 새 push가 진행 중인 실행을 취소한다 (main 실행은 배포 도중 끊기지 않게)
 - **이미지 푸시** (main, CI 전부 통과 후): `ghcr.io/jungyu333/eonje-collector`·`eonje-airflow`를 `<sha>`와 `main` 태그로. 배포는 항상 sha로 고른다. 워크플로 기본 권한은 `contents: read`, 푸시 잡만 `packages: write`. 패키지는 처음 푸시 후 GitHub에서 한 번 public으로 바꾼다(서버가 인증 없이 pull)
-- **CD** (main 머지):
-  1. CI의 이미지 푸시가 끝난 sha를 배포한다
-  2. deploy 잡이 Tailscale에 임시 노드(`tag:ci`)로 접속. ACL로 노드의 SSH 포트에만 허용
-  3. `scp`로 compose 파일 복사 → `ssh <노드> "EONJE_IMAGE_TAG=<sha> docker compose pull"`
-  4. 스키마 적용: Postgres는 Alembic `upgrade head`(collector 이미지, 마이그레이션 포함), Iceberg는 `ensure-iceberg-tables`(spark 이미지, 3단계부터). 둘 다 멱등이라 매 배포마다 돌린다. 실패하면 배포를 멈추고 `deploy` ref를 옮기지 않는다 → 새 DAG가 없는 테이블을 부르지 않는다
-  5. `docker compose up -d`
-  6. 헬스체크 (API `/health`, Airflow 상태)
-  7. Git의 `deploy` ref를 `<sha>`로 이동 → Airflow가 새 DAG를 가져감
-- **DAG 배포는 GitDagBundle**(`tracking_ref=deploy`, `subdir=dags`). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 이미지 푸시 후 ref를 옮겨 순서를 보장한다. DAG만 바뀌면 ref만 옮기면 된다
-- 배포 전용 SSH 키와 Tailscale OAuth 클라이언트는 GitHub Secrets. 필요하면 GitHub Environment `production`으로 수동 승인
-- 롤백: `workflow_dispatch`로 이전 sha를 다시 배포
+- **CD** (`.github/workflows/deploy.yml`, CI가 이미지 푸시 뒤 호출. 수동 실행도 가능):
+  1. sha 형식과 그 sha의 이미지가 GHCR에 있는지 확인
+  2. 러너가 Tailscale 임시 노드(`tag:ci`, OAuth 클라이언트)로 tailnet에 접속. ACL은 `tag:ci → eonje-a:22`만 허용하고, 저장할 때마다 정책 테스트로 확인한다
+  3. `deploy` 계정으로 compose 파일 두 개, `init.sh`, 배포 스크립트를 `scp`
+  4. 서버에 복사한 `infra/deploy/node-a.sh <sha>`를 ssh로 실행(표준입력으로 흘려 넣지 않음: `docker compose run`이 남은 스크립트를 먹는다): 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → `migrate`(Alembic, 3단계부터 `ensure-iceberg-tables`도) → 원본 버킷 확인 → `up -d --wait`(헬스체크 대기). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지
+  5. 성공하면 `deploy` 브랜치를 `<sha>`로 force 이동 → GitDagBundle이 새 DAG를 가져감 (`refresh_interval` 60초)
+- **DAG 배포는 GitDagBundle**(`compose.node-a.prod.yaml`: `repo_url` 공개 레포, `tracking_ref=deploy`, `subdir=dags`, 연결·토큰 없음). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 배포 성공 후 브랜치를 옮겨 순서를 보장한다. 운영에서도 DAG는 멈춘 상태로 등록되므로, 첫 배포 후 사람이 한 번 켜야 수집이 시작된다
+- 시크릿 (GitHub Actions): `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`(배포 전용 키, 서버 `authorized_keys`에서 `from="100.64.0.0/10"`과 포워딩 금지로 제한), `DEPLOY_KNOWN_HOSTS`(eonje-a 호스트 키, Tailscale 주소 기준)
+- 롤백: Actions 탭에서 deploy 워크플로를 sha(`~/eonje/image.env.prev`의 값)로 수동 실행. 이미지와 DAG가 함께 되돌아간다. 마이그레이션은 되돌리지 않으므로, 스키마를 바꾸는 변경은 이전 코드와도 호환되게 만든다
+- 배포는 한 번에 하나씩 순서대로 돈다 (`concurrency: deploy-node-a`, 취소 없음)
 - self-hosted runner는 쓰지 않는다 (public 레포)
-- 단계: CI는 골격 직후 PR, CD는 수집기 배포(2단계) PR
-- CD PR에서 정할 것: 서버 배치를 개발 PC와 같게(`~/eonje/infra/compose.node-a.yaml` + `~/eonje/.env`) 둘지 — compose가 `../.env`(scheduler `env_file`)와 `../dags`(개발용 마운트)를 상대 경로로 쓴다. 운영은 `dags/` 마운트 대신 GitDagBundle
 
 ### 8.4 공개와 접근
 
