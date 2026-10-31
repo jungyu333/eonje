@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -65,3 +65,6 @@ migration-check: ## models.py와 마이그레이션이 일치하는지 (DB 필�
 
 buckets:         ## 원본 버킷 생성 (이미 있으면 성공으로 봄)
 	$(COMPOSE) exec -T seaweedfs sh -c 'b="$${EONJE_RAW_BUCKET:-eonje-raw}"; out=$$(echo "s3.bucket.create -name $$b" | weed shell 2>&1); echo "$$out"; case "$$out" in *"created bucket"*|*"already exists"*) exit 0 ;; *) exit 1 ;; esac'
+
+migrate-image:   ## 이미지 안의 마이그레이션 적용 (CD와 같은 경로). make build 먼저
+	$(COMPOSE) run --rm migrate
