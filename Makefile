@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -75,3 +75,11 @@ airflow-recreate: ## .env 변경(비밀번호 등)을 Airflow api-server에 반�
 
 dags-check:      ## Airflow 컨테이너에서 DAG import 오류 확인 (make up 필요)
 	$(COMPOSE) exec airflow-dag-processor airflow dags list-import-errors
+
+dag-test:        ## DAG를 켜지 않고 한 번 실행. 예: make dag-test DAG=ev_status_10min
+	$(if $(DAG),,$(error usage: make dag-test DAG=<dag_id>))
+	$(COMPOSE) exec airflow-scheduler airflow dags test $(DAG)
+
+dag-pause:       ## DAG 끄기 (실수로 켰을 때). 예: make dag-pause DAG=ev_status_10min
+	$(if $(DAG),,$(error usage: make dag-pause DAG=<dag_id>))
+	$(COMPOSE) exec airflow-scheduler airflow dags pause $(DAG)
