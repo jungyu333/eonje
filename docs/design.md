@@ -523,12 +523,14 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 - 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
 - **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres). PR에서만 새 push가 진행 중인 실행을 취소한다 (main 실행은 배포 도중 끊기지 않게)
+- **바뀐 파일에 따라 job을 고른다** (`changes` job, `dorny/paths-filter`): Python 검사는 `.py`·의존성이 바뀔 때, collector 이미지는 `eonje/`·마이그레이션·Dockerfile, Airflow 이미지는 `dags/`·`docker/airflow/`, DB 테스트는 `eonje/`·`tests/`·`infra/`가 바뀔 때만. 건너뛴 job은 통과로 친다. `ci.yml`이 바뀌면 전부 돈다
+- **배포할 것이 없으면 배포하지 않는다**: main push가 `eonje/`·`dags/`·`docker/`·`infra/`·의존성·`deploy.yml`을 건드릴 때만 이미지를 전부 빌드해 푸시하고 배포한다. 문서·테스트만 바뀐 머지는 검사만 돌고 끝난다 (배포마다 Airflow 컨테이너가 새 sha로 다시 만들어지므로 불필요한 재시작을 줄인다)
 - **이미지 푸시** (main, CI 전부 통과 후): `ghcr.io/jungyu333/eonje-collector`·`eonje-airflow`를 `<sha>`와 `main` 태그로. 배포는 항상 sha로 고른다. 워크플로 기본 권한은 `contents: read`, 푸시 잡만 `packages: write`. 패키지는 처음 푸시 후 GitHub에서 한 번 public으로 바꾼다(서버가 인증 없이 pull)
 - **CD** (`.github/workflows/deploy.yml`, CI가 이미지 푸시 뒤 호출. 수동 실행도 가능):
   1. sha 형식과 그 sha의 이미지가 GHCR에 있는지 확인
   2. 러너가 Tailscale 임시 노드(`tag:ci`, OAuth 클라이언트)로 tailnet에 접속. ACL은 `tag:ci → eonje-a:22`만 허용하고, 저장할 때마다 정책 테스트로 확인한다
   3. `deploy` 계정으로 compose 파일 두 개, `init.sh`, 배포 스크립트를 `scp`
-  4. 서버에 복사한 `infra/deploy/node-a.sh <sha>`를 ssh로 실행(표준입력으로 흘려 넣지 않음: `docker compose run`이 남은 스크립트를 먹는다): 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → `migrate`(Alembic, 3단계부터 `ensure-iceberg-tables`도) → 원본 버킷 확인 → `up -d --wait`(헬스체크 대기). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지
+  4. 서버에 복사한 `infra/deploy/node-a.sh <sha>`를 ssh로 실행(표준입력으로 흘려 넣지 않음: `docker compose run`이 남은 스크립트를 먹는다): 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → **실행 중인 태스크 컨테이너 대기**(Airflow가 띄운 eonje 이미지 컨테이너, 최대 5분. 마이그레이션과 Airflow 재시작이 수집 중인 태스크를 끊지 않게) → `migrate`(Alembic, 3단계부터 `ensure-iceberg-tables`도) → 원본 버킷 확인 → `up -d --wait`(헬스체크 대기). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지
   5. 성공하면 `deploy` 브랜치를 `<sha>`로 force 이동 → GitDagBundle이 새 DAG를 가져감 (`refresh_interval` 60초)
 - **DAG 배포는 GitDagBundle**(`compose.node-a.prod.yaml`: `repo_url` 공개 레포, `tracking_ref=deploy`, `subdir=dags`, 연결·토큰 없음). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 배포 성공 후 브랜치를 옮겨 순서를 보장한다. 운영에서도 DAG는 멈춘 상태로 등록되므로, 첫 배포 후 사람이 한 번 켜야 수집이 시작된다
 - 시크릿 (GitHub Actions): `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`(배포 전용 키, 서버 `authorized_keys`에서 `from="100.64.0.0/10"`과 포워딩 금지로 제한), `DEPLOY_KNOWN_HOSTS`(eonje-a 호스트 키, Tailscale 주소 기준)

@@ -3,7 +3,7 @@
 # CD가 이 파일을 서버에 복사한 뒤 deploy 계정으로 실행한다:  ssh deploy@eonje-a "bash eonje/infra/deploy/node-a.sh <sha>"
 # (bash -s로 표준입력에 흘려 넣지 않는다: docker compose run/exec가 남은 스크립트를 표준입력으로 먹어 버린다)
 #
-# 순서: 이미지 받기 → 저장소 기동 → 마이그레이션 → 버킷 → 전체 기동(헬스체크 대기)
+# 순서: 이미지 받기 → 저장소 기동 → 실행 중인 태스크 대기 → 마이그레이션 → 버킷 → 전체 기동(헬스체크 대기)
 # 마이그레이션이나 기동이 실패하면 여기서 멈추고 image.env는 직전 성공 sha를 유지한다.
 # 롤백은 직전 sha(image.env.prev)로 다시 배포하면 된다.
 set -euo pipefail
@@ -22,6 +22,22 @@ compose=(docker compose
 # collector는 tools 프로필(migrate)에서만 쓰여 기본 pull 대상이 아니다
 "${compose[@]}" --profile tools pull
 "${compose[@]}" up -d --wait postgres seaweedfs
+
+# Airflow가 띄운 태스크 컨테이너(compose 프로젝트 라벨이 없는 eonje 이미지)가 돌고 있으면 끝날 때까지 기다린다.
+# 마이그레이션과 Airflow 재시작이 수집 중인 태스크를 끊지 않게 한다.
+# 수집 태스크의 execution_timeout(기본 5분)만큼 기다리고, 그래도 남아 있으면 그냥 배포한다.
+running_tasks() {
+  docker ps --format '{{.Image}} {{.Label "com.docker.compose.project"}}' \
+    | awk '$2 == "" && $1 ~ /eonje-/' | wc -l
+}
+for _ in $(seq 60); do
+  n=$(running_tasks)
+  [[ "$n" -eq 0 ]] && break
+  echo "waiting for $n running task container(s)"
+  sleep 5
+done
+[[ "$(running_tasks)" -eq 0 ]] || echo "task containers still running after 5 min; deploying anyway" >&2
+
 "${compose[@]}" run --rm -T migrate < /dev/null
 
 # 버킷이 이미 있으면 weed shell이 0이 아닌 코드로 끝날 수 있다. 판단은 출력으로 하고,
