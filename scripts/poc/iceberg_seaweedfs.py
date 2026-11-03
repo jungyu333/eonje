@@ -169,6 +169,11 @@ def main() -> int:
                 FROM range({n})"""
         )
 
+    def date_list(view: str, column: str) -> str:
+        # MERGE의 ON 절은 서브쿼리를 받지 않는다. 소스에 나온 날짜를 먼저 구해 리터럴로 넣는다
+        days = [r[0] for r in sql(f"SELECT DISTINCT {column} FROM {view}").collect()]
+        return ", ".join(f"date'{d}'" for d in days)
+
     merge_ignore = f"""
         MERGE INTO {t("obs")} t USING src s
         ON t.stat_id = s.stat_id AND t.charger_id = s.charger_id AND t.run_key = s.run_key
@@ -192,7 +197,7 @@ def main() -> int:
         source_view("run-a", 0)
         bounded = f"""
             MERGE INTO {t("obs")} t USING src s
-            ON t.observed_date IN (SELECT DISTINCT observed_date FROM src)
+            ON t.observed_date IN ({date_list("src", "observed_date")})
                AND t.stat_id = s.stat_id AND t.charger_id = s.charger_id AND t.run_key = s.run_key
             WHEN NOT MATCHED THEN INSERT *"""
         before = count("obs")
@@ -215,7 +220,7 @@ def main() -> int:
         )
         merge = f"""
             MERGE INTO {t("session")} t USING ended s
-            ON t.started_date IN (SELECT DISTINCT started_date FROM ended)
+            ON t.started_date IN ({date_list("ended", "started_date")})
                AND t.stat_id = s.stat_id AND t.charger_id = s.charger_id
                AND t.started_at = s.started_at
             WHEN MATCHED THEN UPDATE SET t.ended_at = s.ended_at, t.duration_min = s.duration_min
@@ -266,7 +271,11 @@ def main() -> int:
     @check("7a. rewrite_data_files (작은 파일 합치기)")
     def _() -> str:
         before = sql(f"SELECT count(*) FROM {t('obs')}.files").first()[0]
-        sql(f"CALL {CATALOG}.system.rewrite_data_files(table => '{NS}.obs')")
+        # 기본 기준(그룹당 입력 파일 5개 이상)이면 PoC 규모에선 합칠 대상이 없다
+        sql(
+            f"""CALL {CATALOG}.system.rewrite_data_files(
+                    table => '{NS}.obs', options => map('min-input-files', '2'))"""
+        )
         after = sql(f"SELECT count(*) FROM {t('obs')}.files").first()[0]
         assert after <= before, (before, after)
         return f"data files {before} → {after}"
@@ -333,7 +342,9 @@ def main() -> int:
             },
         )
         table = cat.load_table(f"{NS}.obs").scan().to_arrow()
-        n = duckdb.from_arrow(table).aggregate("count(*)").fetchone()[0]
+        con = duckdb.connect()
+        con.register("obs", table)
+        n = con.execute("SELECT count(*) FROM obs").fetchone()[0]
         assert n == 10000, n
         return f"pyiceberg+duckdb rows={n}"
 
