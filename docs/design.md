@@ -241,7 +241,7 @@ flowchart TB
 | 수집 저장 | pyarrow + s3fs | 수집은 Spark 없이 Parquet 쓰기만 |
 | 변환·집계 | **Apache Spark (PySpark), standalone 클러스터, client 모드** | 단일 엔진. 10분 증분과 백필이 같은 코드. 노드 추가 시 worker만 붙임 (8.2) |
 | 원본 저장 | Parquet, SeaweedFS (S3 호환, `weed server -s3`) | 수집은 s3fs, Spark는 s3a. S3 접속 키는 SeaweedFS S3 identity 설정(JSON)으로, 버킷은 `weed shell`의 `s3.bucket.create`로 만든다 |
-| DW 테이블 | **Apache Iceberg** (SeaweedFS `eonje-warehouse` 버킷, JDBC 카탈로그는 Postgres `eonje` DB) | Parquet 파일 묶음을 원자적 커밋·스키마 변경·시간 여행·`MERGE`가 되는 테이블로. 새 상시 서비스 없음. Spark가 쓰고 DuckDB·PyIceberg가 복사 없이 읽는다. SeaweedFS·Spark와의 호환은 3단계 첫 작업으로 확인 (11장) |
+| DW 테이블 | **Apache Iceberg** (SeaweedFS `eonje-warehouse` 버킷, JDBC 카탈로그는 Postgres `eonje` DB) | Parquet 파일 묶음을 원자적 커밋·스키마 변경·시간 여행·`MERGE`가 되는 테이블로. 새 상시 서비스 없음. Spark가 쓰고 DuckDB·PyIceberg가 복사 없이 읽는다. SeaweedFS 위 호환은 PoC로 확인(2026.11.03, 8.2) |
 | 서비스 DB | PostgreSQL 16 (1 인스턴스, `airflow`·`eonje` 2 DB), SQLAlchemy 2 ORM (Declarative, `Mapped[]`), psycopg 3, Alembic | 마트·현재 상태·운영 테이블. 모델이 Postgres 스키마·마이그레이션·API 조회의 단일 출처. 적재는 Spark JDBC 스테이징 → `INSERT ... ON CONFLICT` |
 | 예측 | LightGBM, 생존분석 등 표 데이터 모델 | 주 1회 학습(B), 매시 배치 추론 → 예측 테이블. 서빙은 테이블 조회만 (10장) |
 | 자연어 요약 | 외부 LLM API | 자체 호스팅 안 함. 생성한 문장만 저장 |
@@ -381,7 +381,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 - 팩트는 **추가만** 한다. 고칠 일은 새 행으로 남긴다 (보정 전이). 예외는 세션 종료 갱신 하나
 - **키가 있는 테이블은 단순 `append`로 쓰지 않는다.** Iceberg에는 고유 제약이 없어 재실행하면 중복 행이 생긴다. 키 충돌 무시는 `MERGE ... WHEN NOT MATCHED INSERT`로 구현한다. 단순 `append`는 키가 없는 테이블에만
-- **`MERGE`의 `ON` 절에 파티션 컬럼 범위를 함께 건다.** 키만 쓰면 매번 대상 테이블 전체를 읽어 비용이 데이터와 함께 계속 커진다. 파티션 컬럼(`observed_date`·`at_date`·`started_date`)은 키 시각에서 파생되므로, 소스에 나온 날짜만 대상으로 좁혀도 결과는 같다 (예: `t.observed_date IN (소스의 날짜들) AND t.stat_id = s.stat_id AND ...`)
+- **`MERGE`의 `ON` 절에 파티션 컬럼 범위를 함께 건다.** 키만 쓰면 매번 대상 테이블 전체를 읽어 비용이 데이터와 함께 계속 커진다. 파티션 컬럼(`observed_date`·`at_date`·`started_date`)은 키 시각에서 파생되므로, 소스에 나온 날짜만 대상으로 좁혀도 결과는 같다 (예: `t.observed_date IN (date'2026-11-03', ...) AND t.stat_id = s.stat_id AND ...`). Spark는 `MERGE`의 `ON` 절에 서브쿼리를 받지 않으므로, 소스에서 날짜를 먼저 모아 **리터럴로** 넣는다(PoC에서 확인)
 - 디멘션 연결: 팩트 시각이 디멘션의 `[valid_from, valid_to)`에 들어가는 버전. 현재 버전은 `valid_to = 9999-12-31`, `is_current = true`
 - 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
 
@@ -494,7 +494,14 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - master·worker·드라이버 모두 `network_mode: host`, `spark.driver.host` = A의 랜 IP. 앱마다 `spark.cores.max`·`spark.executor.memory`로 자원을 나눈다
 - A 단독일 때: worker 코어 2~3·메모리 4GB 정도, Spark 앱은 pool 슬롯 1. Spark master UI 포트는 8080에서 바꾼다(Airflow api-server와 충돌), worker UI 포트도 조정
 - B 추가 시: B에 worker를 `spark://<A>:7077`로 붙인다. A의 `.env`·DAG·코드는 바뀌지 않는다. 이후 A의 worker를 줄이거나 내린다(미결)
-- 이미지에 넣는 jar: `iceberg-spark-runtime`, `hadoop-aws`(s3a), Postgres JDBC 드라이버. Iceberg 카탈로그 설정(`spark.sql.catalog.lake.*`)은 `storage/spark.py`가 설정값으로 주입한다
+- 이미지(`docker/tasks/spark`): `python:3.11-slim` + Java 21 + pip `pyspark` 4.1.3. pip pyspark에 master·worker 실행 파일까지 들어 있어 드라이버·master·worker가 이미지 하나를 쓴다. jar는 빌드 때 Maven에서 받아 sha1로 확인하고 pyspark의 `jars/`에 넣는다(실행 중 내려받지 않음)
+  - `iceberg-spark-runtime-4.1_2.13` 1.12.0, `iceberg-aws-bundle` 1.12.0 (Iceberg 테이블은 S3FileIO)
+  - `hadoop-aws` 3.4.2 (Spark 4.1.3의 Hadoop과 같은 버전. 원본 Parquet을 `s3a://`로 읽음, 고아 파일 목록)
+  - AWS SDK v2는 **Iceberg 번들의 것 한 벌(2.54.17)**만 둔다. hadoop-aws가 추가로 요구하는 `s3-transfer-manager`, `apache-client`만 같은 버전으로 더한다. Hadoop용 SDK 전체 번들(2.29.x)을 따로 넣으면 같은 클래스가 두 버전으로 섞인다
+  - Postgres JDBC 42.7.13 (JDBC 카탈로그)
+- Iceberg 카탈로그 설정(`spark.sql.catalog.lake.*`)은 `storage/spark.py`가 설정값으로 주입한다. PoC로 확인한 필수 값: `catalog-impl=JdbcCatalog`, `jdbc.schema-version=V1`(1.12는 없으면 거부), `io-impl=S3FileIO`, `s3.endpoint`, `s3.path-style-access=true`, 키 이름은 `s3.access-key-id`·`s3.secret-access-key`(짧은 이름은 조용히 무시됨), `client.region`(아무 값이나, SDK가 요구). Hadoop 쪽은 `fs.s3a.*`(endpoint, path style, SSL 끔, Simple 자격 증명)와 `fs.s3.impl=S3AFileSystem`(Iceberg의 `s3://` 경로를 Hadoop이 다룰 때)
+- **SeaweedFS + Iceberg 호환성 PoC (2026.11.03, `make poc-iceberg`, `scripts/poc/iceberg_seaweedfs.py`): 11/11 통과.** 테이블 생성(KST 날짜 파티션), `MERGE` 키 충돌 무시와 재실행 멱등, 날짜 리터럴로 범위를 건 `MERGE`, 행을 갱신하는 `MERGE`, 동시 커밋 2개(JDBC 카탈로그가 한쪽을 거절 → Iceberg가 재시도해 둘 다 반영, 로그로 확인), 시간 여행, `rewrite_data_files`, `expire_snapshots`, 고아 파일 정리, 원본 Parquet `s3a://` 읽기, PyIceberg → DuckDB 읽기. Postgres 스키마로 전환하지 않는다
+  - 고아 파일 정리: `CALL remove_orphan_files`는 24시간보다 최근 파일을 대상으로 삼지 못한다(동시 쓰기 중인 파일을 지우지 않게 하는 안전장치). 운영은 기본값(3일 이전)으로 쓴다. PoC에서는 심어 둔 파일 외에 4개가 더 지워졌다: 재시도된 동시 커밋 같은 실패한 쓰기가 남긴 파일로 보이며, 정리 작업이 실제로 필요하다는 근거다
 - 노드 간 통신 (B 추가 후): B → A는 SeaweedFS S3 8333, Postgres 5432, Spark master 7077, 모니터링 수집 대상. A → B는 Docker 데몬(학습 태스크, SSH 방식 권장), 드라이버 ↔ executor 포트. 전부 집 내부망·Tailscale에서만, 필요하면 `spark.authenticate`
 
 ### 8.3 배포 (CI/CD)
@@ -591,7 +598,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | **첫 작업: 호환성 확인** — SeaweedFS + Spark + Iceberg(JDBC 카탈로그)로 작은 테이블 생성·추가·읽기·`MERGE`·유지보수. 실패하면 `stg`·`core`를 Postgres 스키마로 전환. 이어서 Spark 도입(A에 master·worker), `storage/iceberg.py`, `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
+| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. 이어서 Spark 도입(A에 master·worker), `storage/iceberg.py`, `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |

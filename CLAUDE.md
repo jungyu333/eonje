@@ -86,7 +86,8 @@ docs/         # design.md, requirements.md
 - **Iceberg tables only by catalog name** (`lake.stg.obs_status`), never by writing Parquet to their path. Partition by a
   KST date column per table (`*_date`: `observed_date`, `at_date`, `started_date`), not `days()` (UTC). Tables are
   compacted and snapshots expired daily.
-- **`MERGE` conditions include the partition column range** taken from the source (`t.observed_date IN (...)` plus the
+- **`MERGE` conditions include the partition column range** taken from the source as date literals, because Spark rejects
+  subqueries in `MERGE ... ON` (`t.observed_date IN (date'2026-11-03', ...)` plus the
   key). Matching on the key alone scans the whole, ever-growing table every run.
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
 - jars and packages are baked into the `eonje-spark` image; never fetched at runtime.
