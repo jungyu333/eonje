@@ -86,7 +86,7 @@ DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색�
   - 설정 전달: `EONJE_*` 값(서비스 키 포함)은 scheduler 컨테이너만 `.env`에서 받고, 태스크가 **실행될 때** 그 환경에서 읽어 `private_environment`로 넘긴다(`dags/`의 `EonjeTask`). DAG 파싱 때 넘기면 직렬화된 DAG로 Airflow DB에 남는다. 컨테이너 네트워크 안 주소(`postgres`, `seaweedfs`)는 compose가 scheduler 환경에서 덮어쓴다
   - `skip_on_exit_code=99`(예산 소진·늦은 run은 skipped), `do_xcom_push=False`(컨테이너 마지막 로그 줄을 XCom에 쌓지 않음), `mount_tmp_dir=False`
 - 태스크 간 데이터는 XCom이 아니라 SeaweedFS·DB를 거친다. XCom은 run_id·건수·페이지 상한 같은 작은 값만
-- 네트워크: 수집 태스크는 compose 네트워크에 붙어 Postgres·SeaweedFS에 접근. Spark 드라이버 태스크는 `network_mode: host` (다른 노드의 executor가 드라이버에 접속해야 함, 8.2)
+- 네트워크: 수집 태스크는 compose 네트워크에 붙어 Postgres·SeaweedFS에 접근. Spark 드라이버 태스크도 A 단독일 때는 같은 compose 네트워크(executor가 드라이버 컨테이너 IP로 접속). B를 추가하면 Spark 쪽만 `network_mode: host`로 바꾼다 (8.2)
 - 원격 실행: 모델 학습 등 Spark가 아닌 무거운 태스크는 `DockerOperator(docker_url=<B>)`로 B 노드의 Docker에서 실행 (8.1)
 - 효과: Airflow와 파이프라인 의존성 완전 분리. "`eonje`는 Airflow 없이 돈다"는 경계가 런타임에서 강제됨. 이미지가 런타임별이라 수집 이미지에 Spark가 없고, Spark 이미지 크기가 수집 배포를 느리게 하지 않는다
 - 비용: scheduler에 `/var/run/docker.sock` 마운트(호스트 root 상당 권한 — 1인 홈서버에서 감수), 태스크당 컨테이너 기동 수 초(10분 주기엔 무시)
@@ -199,7 +199,7 @@ flowchart TB
 
 - **원칙: 상태를 가진 것(Postgres·SeaweedFS)과 수집 경로·Airflow는 A에만 둔다.** B가 꺼져도 A의 수집은 계속되고, B는 A를 계산·감시·보관하는 보조 노드다. 서비스 배치는 고정 (8.1)
 - **공유기 포트는 열지 않는다.** 공개 트래픽은 Cloudflare Tunnel(나가는 연결)로 `eonje-api`에만, 관리 접근(SSH·Airflow·Spark·SeaweedFS UI·Grafana)은 Tailscale로만
-- 로컬 개발 PC는 `compose.node-a.yaml`을 그대로 쓰고 Spark는 `local[*]`. 차이는 `.env`뿐
+- 로컬 개발 PC는 `compose.node-a.yaml`을 그대로 쓴다. Spark master·worker도 같은 구성으로 띄워 클러스터 모드를 개발 PC에서 검증한다. 차이는 `.env`뿐
 - **Postgres는 인스턴스 하나, 데이터베이스 둘**(`airflow`, `eonje`)에 역할도 둘. `init.sh`로 첫 기동 시 생성(역할 비밀번호는 `.env`에서 받아 레포에 남지 않음). Airflow 메타DB를 초기화·교체해도 `eonje` DB는 무관하고, 백업은 DB 단위 `pg_dump`
 - 원본 저장소는 **SeaweedFS**(S3 호환, 단일 노드는 `weed server -s3` 컨테이너 하나). `storage/`는 S3 프로토콜만 쓰므로(s3fs 수집, s3a Spark) 다른 S3 호환 저장소로 옮겨도 엔드포인트만 교체. 작은 파일을 큰 볼륨 파일에 묶어 저장해서, run마다 작은 Parquet이 쌓이는 원본에 유리하다
 
@@ -488,12 +488,13 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 
 ### 8.2 Spark 실행
 
-- **운영은 처음부터 standalone 클러스터, client 모드.** PySpark는 standalone에서 cluster 모드를 지원하지 않는다. 개발 PC는 `local[*]`
+- **운영은 처음부터 standalone 클러스터, client 모드.** PySpark는 standalone에서 cluster 모드를 지원하지 않는다. 개발 PC도 같은 클러스터 구성이고, `local[*]`은 테스트·빠른 확인용
 - 역할: master = 클러스터 자원 관리자(상시, 하나). 드라이버 = 앱 하나의 지휘자(job마다 생성·소멸, 우리 태스크 컨테이너). worker = executor를 띄우는 노드 데몬. executor = 앱에 배정된 계산 프로세스, 드라이버와 직접 통신
-- master는 A에 고정. `EONJE_SPARK_MASTER=spark://<A>:7077`은 노드가 늘어도 바뀌지 않는다
-- master·worker·드라이버 모두 `network_mode: host`, `spark.driver.host` = A의 랜 IP. 앱마다 `spark.cores.max`·`spark.executor.memory`로 자원을 나눈다
+- master는 A에 고정. 앱마다 `spark.cores.max`·`spark.executor.memory`로 자원을 나눈다
+- **네트워크 (2026.11.03 결정): A 단독일 때는 compose 기본 네트워크(bridge).** master·worker·드라이버가 모두 `eonje_default`에 붙고, `EONJE_SPARK_MASTER=spark://spark-master:7077`, Postgres·SeaweedFS도 collector와 같은 서비스 이름으로 접근. executor가 드라이버에 직접 접속하므로 `spark.driver.host` = 드라이버 컨테이너 IP(`storage/spark.py`가 구함, 컨테이너 hostname은 다른 컨테이너에서 이름으로 찾지 못할 수 있음), `spark.driver.bindAddress=0.0.0.0`
+  - host 모드를 처음부터 쓰지 않는 이유: Docker Desktop(Windows)에서 host 네트워크가 제대로 동작하지 않아 드라이버 ↔ executor 연결을 운영에서 처음 검증하게 되고, 호스트에 드라이버·executor·UI 포트가 열린다. B는 측정으로 결정하므로(8.1) 그 전까지는 collector와 같은 방식으로 통일한다
 - A 단독일 때: worker 코어 2~3·메모리 4GB 정도, Spark 앱은 pool 슬롯 1. Spark master UI 포트는 8080에서 바꾼다(Airflow api-server와 충돌), worker UI 포트도 조정
-- B 추가 시: B에 worker를 `spark://<A>:7077`로 붙인다. A의 `.env`·DAG·코드는 바뀌지 않는다. 이후 A의 worker를 줄이거나 내린다(미결)
+- B 추가 시: B의 executor는 A의 bridge 안 드라이버에 닿을 수 없으므로 Spark 쪽만 host 모드로 전환한다. 바뀌는 것은 spark 서비스와 Spark 태스크의 `network_mode`, `EONJE_SPARK_MASTER=spark://<A 주소>:7077`, `spark.driver.host` = A의 랜 IP, Postgres·SeaweedFS 주소(호스트 포트). 코드 구조는 그대로. B에 worker를 붙이고, 이후 A의 worker를 줄이거나 내린다(미결)
 - 이미지(`docker/tasks/spark`): `python:3.11-slim` + Java 21 + pip `pyspark` 4.1.3. pip pyspark에 master·worker 실행 파일까지 들어 있어 드라이버·master·worker가 이미지 하나를 쓴다. jar는 빌드 때 Maven에서 받아 sha1로 확인하고 pyspark의 `jars/`에 넣는다(실행 중 내려받지 않음)
   - `iceberg-spark-runtime-4.1_2.13` 1.12.0, `iceberg-aws-bundle` 1.12.0 (Iceberg 테이블은 S3FileIO)
   - `hadoop-aws` 3.4.2 (Spark 4.1.3의 Hadoop과 같은 버전. 원본 Parquet을 `s3a://`로 읽음, 고아 파일 목록)
