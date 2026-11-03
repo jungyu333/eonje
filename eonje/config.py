@@ -6,6 +6,9 @@ from functools import lru_cache
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# S3 버킷 이름 규칙. 스킴(s3://, s3a://)은 쓰는 쪽이 붙인다
+_BUCKET_PATTERN = r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+
 
 class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="EONJE_", env_file=".env", extra="ignore")
@@ -33,12 +36,17 @@ class Settings(DatabaseSettings):
     serve_zcodes: list[str] = Field(default_factory=list)
 
     # 저장
-    # S3 버킷 이름 규칙. 스킴(s3://, s3a://)은 쓰는 쪽이 붙인다
-    raw_bucket: str = Field(default="eonje-raw", pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+    raw_bucket: str = Field(default="eonje-raw", pattern=_BUCKET_PATTERN)
+    # Iceberg 테이블 데이터 (s3://<warehouse_bucket>/)
+    warehouse_bucket: str = Field(default="eonje-warehouse", pattern=_BUCKET_PATTERN)
     # SeaweedFS S3. 컨테이너 안에서는 http://seaweedfs:8333
     s3_endpoint_url: str = "http://127.0.0.1:8333"
     s3_access_key: SecretStr | None = None
     s3_secret_key: SecretStr | None = None
+
+    # Spark
+    # 컨테이너 안(compose)에서는 spark://spark-master:7077. 호스트에서 직접 돌릴 때는 로컬 모드
+    spark_master: str = "local[2]"
 
     @property
     def fetch_max_lag(self) -> timedelta:
