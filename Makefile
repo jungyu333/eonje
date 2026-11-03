@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify poc-iceberg
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -90,10 +90,3 @@ dag-test:        ## DAG를 켜지 않고 한 번 실행. 예: make dag-test DAG=
 dag-pause:       ## DAG 끄기 (실수로 켰을 때). 예: make dag-pause DAG=ev_status_10min
 	$(if $(DAG),,$(error usage: make dag-pause DAG=<dag_id>))
 	$(COMPOSE) exec airflow-scheduler airflow dags pause $(DAG)
-
-# MSYS_NO_PATHCONV: Windows Git Bash가 /poc/... 인자를 바꾸지 않게
-poc-iceberg:     ## 3단계 PoC: SeaweedFS+Spark+Iceberg 호환성 확인 (make up, make buckets, make build 먼저). 남기려면 ARGS=--keep
-	MSYS_NO_PATHCONV=1 docker run --rm --network eonje_default --env-file .env \
-		-e EONJE_S3_ENDPOINT_URL=http://seaweedfs:8333 \
-		-v "$(CURDIR)/scripts/poc:/poc:ro" \
-		eonje-spark:$(TAG) python /poc/iceberg_seaweedfs.py $(ARGS)
