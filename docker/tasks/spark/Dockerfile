@@ -6,8 +6,9 @@
 #  - Spark 4.1.3: Iceberg 1.12가 정식 runtime을 배포한 최신 계열. Iceberg 빌드가 4.1.3으로 검증됨
 #  - Iceberg 1.12.0: iceberg-spark-runtime-4.1_2.13 + iceberg-aws-bundle(S3FileIO, AWS SDK v2 포함)
 #  - hadoop-aws 3.4.2: Spark 4.1.3에 들어 있는 Hadoop과 같은 버전. 원본 Parquet을 s3a://로 읽는 데 필요
-#    AWS SDK는 iceberg-aws-bundle의 것 한 벌만 쓴다. hadoop-aws가 추가로 요구하는 transfer manager만
-#    같은 SDK 버전(Iceberg 1.12 빌드의 awssdk-bom 2.54.17)으로 넣는다
+#    AWS SDK는 iceberg-aws-bundle의 것 한 벌만 쓴다. hadoop-aws가 추가로 요구하는 모듈
+#    (s3-transfer-manager, apache-client)만 같은 SDK 버전(Iceberg 1.12 빌드의 awssdk-bom 2.54.17)으로 넣는다.
+#    apache-client가 쓰는 Apache HttpClient 4.x는 Spark에 이미 들어 있다
 #  - Java 21(Debian trixie 기본), Python 3.11(eonje와 같음)
 FROM python:3.11-slim-trixie
 
@@ -43,8 +44,9 @@ RUN set -eu; \
     fetch "org/apache/iceberg/iceberg-aws-bundle/${ICEBERG_VERSION}/iceberg-aws-bundle-${ICEBERG_VERSION}.jar"; \
     fetch "org/apache/hadoop/hadoop-aws/${HADOOP_VERSION}/hadoop-aws-${HADOOP_VERSION}.jar"; \
     fetch "software/amazon/awssdk/s3-transfer-manager/${AWS_SDK_VERSION}/s3-transfer-manager-${AWS_SDK_VERSION}.jar"; \
+    fetch "software/amazon/awssdk/apache-client/${AWS_SDK_VERSION}/apache-client-${AWS_SDK_VERSION}.jar"; \
     fetch "org/postgresql/postgresql/${POSTGRES_JDBC_VERSION}/postgresql-${POSTGRES_JDBC_VERSION}.jar"; \
-    ls -1 "$jars" | grep -E 'iceberg|hadoop-(aws|client)|postgresql|transfer|bundle'
+    ls -1 "$jars" | grep -E 'iceberg|hadoop-(aws|client)|postgresql|transfer|apache-client|httpclient|httpcore|bundle'
 
 RUN useradd --create-home --uid 10001 app
 USER app
