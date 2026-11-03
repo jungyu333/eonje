@@ -122,6 +122,7 @@ services:
       # 컨테이너 네트워크 안 주소로 덮어씀 (.env의 127.0.0.1은 호스트용)
       EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD}@postgres:5432/eonje
       EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_SPARK_MASTER: spark://spark-master:7077
     group_add:
       - "${DOCKER_GID:-0}"                # docker.sock 접근
     volumes:
