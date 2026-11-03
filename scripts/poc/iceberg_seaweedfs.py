@@ -303,12 +303,22 @@ def main() -> int:
         fs = path.getFileSystem(spark._jsc.hadoopConfiguration())  # noqa: SLF001
         fs.create(path).close()
         time.sleep(2)
-        removed = sql(
-            f"""CALL {CATALOG}.system.remove_orphan_files(
-                    table => '{NS}.obs',
-                    older_than => TIMESTAMP '{now_literal()}')"""
-        ).collect()
-        names = [r[0] for r in removed]
+        # CALL remove_orphan_files는 24시간보다 최근 파일을 대상으로 삼지 못하게 막는다(안전장치).
+        # 운영은 기본값(3일 이전)으로 프로시저를 쓰면 되고, PoC는 목록·삭제 동작만 보려고
+        # 같은 기능의 Action API를 시간 제한 없이 직접 부른다
+        jspark = spark._jsparkSession  # noqa: SLF001
+        table = jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(jspark, t("obs"))
+        cutoff_ms = int(time.time() * 1000)
+        result = (
+            jvm.org.apache.iceberg.spark.actions.SparkActions.get(jspark)
+            .deleteOrphanFiles(table)
+            .olderThan(cutoff_ms)
+            .execute()
+        )
+        names: list[str] = []
+        it = result.orphanFileLocations().iterator()  # Java Iterable
+        while it.hasNext():
+            names.append(str(it.next()))
         assert any(n.endswith("orphan-poc.parquet") for n in names), names
         assert not fs.exists(path), "orphan still exists"
         assert count("obs") == 10000, count("obs")  # 데이터 파일은 그대로
