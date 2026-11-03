@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -90,3 +90,6 @@ dag-test:        ## DAG를 켜지 않고 한 번 실행. 예: make dag-test DAG=
 dag-pause:       ## DAG 끄기 (실수로 켰을 때). 예: make dag-pause DAG=ev_status_10min
 	$(if $(DAG),,$(error usage: make dag-pause DAG=<dag_id>))
 	$(COMPOSE) exec airflow-scheduler airflow dags pause $(DAG)
+
+spark-check:     ## Spark 경로 확인: executor 계산 + Iceberg 카탈로그 (make build 후)
+	$(COMPOSE) run --rm -T spark-check < /dev/null
