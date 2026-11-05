@@ -6,7 +6,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from eonje.config import DatabaseSettings, Settings
-from eonje.storage.db import make_engine, make_session_factory, session_scope
+from eonje.storage.postgres.db import make_engine, make_session_factory, session_scope
 
 DB_PASSWORD = "db-pw-should-not-leak"
 DB_URL = f"postgresql+psycopg://eonje:{DB_PASSWORD}@postgres.test:5432/eonje"
@@ -28,7 +28,7 @@ def captured_engine_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         seen.update(kwargs)
         return object()
 
-    monkeypatch.setattr("eonje.storage.db.create_engine", fake)
+    monkeypatch.setattr("eonje.storage.postgres.db.create_engine", fake)
     return seen
 
 

@@ -24,9 +24,9 @@ from eonje.client.errors import ApiError
 from eonje.client.types import CallRecord
 from eonje.collect.delta import Outcome, collect_delta
 from eonje.config import Settings
-from eonje.storage.call_log import CallLogWriter
-from eonje.storage.models import ApiCallLog
-from eonje.storage.raw_paths import run_key_from_run_id
+from eonje.storage.postgres.call_log import CallLogWriter
+from eonje.storage.postgres.models import ApiCallLog
+from eonje.storage.raw.paths import run_key_from_run_id
 
 pytestmark = pytest.mark.db
 

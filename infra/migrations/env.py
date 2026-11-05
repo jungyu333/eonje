@@ -4,7 +4,7 @@ from alembic import context
 from sqlalchemy import Connection, engine_from_config, pool
 
 from eonje.config import get_database_settings
-from eonje.storage.models import Base
+from eonje.storage.postgres.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

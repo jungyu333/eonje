@@ -7,8 +7,8 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Dialect
 from sqlalchemy.schema import CreateIndex, CreateTable
 
-from eonje.storage.models import Base
-from eonje.storage.raw_paths import Dataset, RawRun
+from eonje.storage.postgres.models import Base
+from eonje.storage.raw.paths import Dataset, RawRun
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         seen.update(kwargs)
         return object()
 
-    monkeypatch.setattr("eonje.storage.fs.s3fs.S3FileSystem", fake)
+    monkeypatch.setattr("eonje.storage.raw.fs.s3fs.S3FileSystem", fake)
     return seen
 
 

@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from eonje.storage.raw_paths import (
+from eonje.storage.raw.paths import (
     MAX_PAGE_NO,
     Dataset,
     RawRun,

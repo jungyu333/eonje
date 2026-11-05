@@ -11,10 +11,10 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 from eonje.client.response import parse_response
 from eonje.client.types import Page
-from eonje.storage.raw_paths import RawRun, manifest_path, page_path, run_prefix
-from eonje.storage.raw_run import MANIFEST_VERSION, RawRunWriter, RunManifest, read_manifest
+from eonje.storage.raw.paths import RawRun, manifest_path, page_path, run_prefix
+from eonje.storage.raw.run import MANIFEST_VERSION, RawRunWriter, RunManifest, read_manifest
 
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "evcharger"
+FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "evcharger"
 BUCKET = "eonje-raw"
 PAGE_SIZE = 10
 KST = timezone(timedelta(hours=9))

@@ -1,4 +1,4 @@
-"""DB tests for eonje.storage.call_log: CallLogWriter and count_calls against real Postgres."""
+"""DB tests for eonje.storage.postgres.call_log: CallLogWriter and count_calls (real Postgres)."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
@@ -13,9 +13,9 @@ from tenacity import wait_none
 from eonje.client.evcharger import EvChargerClient
 from eonje.client.types import CallRecord
 from eonje.config import Settings
-from eonje.storage.call_log import CallLogWriter, count_calls
-from eonje.storage.db import session_scope
-from eonje.storage.models import ApiCallLog
+from eonje.storage.postgres.call_log import CallLogWriter, count_calls
+from eonje.storage.postgres.db import session_scope
+from eonje.storage.postgres.models import ApiCallLog
 
 pytestmark = pytest.mark.db
 

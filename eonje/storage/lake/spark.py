@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.engine import make_url
 
-from eonje.storage.fs import s3_credentials
+from eonje.storage.raw.fs import s3_credentials
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession

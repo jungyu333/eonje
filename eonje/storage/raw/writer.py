@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 from fsspec import AbstractFileSystem
 
 from eonje.client.types import Page
-from eonje.storage.raw_paths import RawRun, page_path
+from eonje.storage.raw.paths import RawRun, page_path
 from eonje.timeutil import require_aware
 
 META_FIELDS = (
