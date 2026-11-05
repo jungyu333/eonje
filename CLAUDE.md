@@ -19,11 +19,14 @@ eonje/        # Pure Python package. Never imports airflow.
   budget/     # Daily call budget: usage lookup, run/skip decision, page cap
   collect/    # Collection flows (budget -> paging -> raw run). Combines client/budget/storage; HTTP client,
               #   filesystem and DB session factory are injected, never built here. Returns an outcome, not an exit code.
-  storage/    # raw.py (Parquet write, collector), spark.py (SparkSession + Iceberg catalog, s3a read, JDBC staging write),
-              #   iceberg.py (Iceberg table definitions), models.py (SQLAlchemy ORM), db.py (engine, staging -> ON CONFLICT)
+  storage/    # One subpackage per store:
+              #   postgres/ models.py (SQLAlchemy ORM), db.py (engine, staging -> ON CONFLICT), call_log.py
+              #   raw/      fs.py (S3 filesystem), paths.py, writer.py (Parquet write, collector), run.py (run + manifest)
+              #   lake/     spark.py (SparkSession + Iceberg catalog, s3a read, JDBC staging write),
+              #             iceberg.py (Iceberg table definitions)
   transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O.
   codes/      # Versioned code tables (YAML) + loader
-api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.models.
+api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.postgres.models.
 dags/         # Thin Airflow DAGs (a plain folder, no __init__.py). DockerOperator running eonje.cli in a runtime image;
               #   EONJE_* settings are read at execution time and passed as private_environment. GitDagBundle in prod.
 docker/       # One Dockerfile per runtime image: tasks/collector, tasks/spark, tasks/ml, api
@@ -43,8 +46,8 @@ docs/         # design.md, requirements.md
 - **Three stores, one role each:** raw Parquet in SeaweedFS (lake; a completed run is immutable), Iceberg `stg`/`core` on SeaweedFS
   (DW: observations, facts, SCD2 dimensions), Postgres `mart`/`ops` (serving aggregates, current state, call log,
   quality metrics). `api/` reads Postgres only.
-- **One schema source per store.** Postgres: `storage/models.py` (Alembic autogenerates from it; `api/` queries the same
-  models). Iceberg: `storage/iceberg.py`, applied by an idempotent job (`CREATE TABLE IF NOT EXISTS`, add missing
+- **One schema source per store.** Postgres: `storage/postgres/models.py` (Alembic autogenerates from it; `api/` queries the same
+  models). Iceberg: `storage/lake/iceberg.py`, applied by an idempotent job (`CREATE TABLE IF NOT EXISTS`, add missing
   columns) — never Alembic. Alembic ignores the `iceberg` catalog schema.
 - **Bulk loads never use `session.add` per row.** Postgres: Spark writes a JDBC staging table, then
   `INSERT ... ON CONFLICT`. Iceberg: `MERGE INTO` for every keyed table except small static ones rewritten whole (`dim_date`) (`WHEN NOT MATCHED INSERT` for
@@ -92,7 +95,7 @@ docs/         # design.md, requirements.md
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
 - jars and packages are baked into the `eonje-spark` image; never fetched at runtime. pyspark is the `spark` extra
   (`make install` installs it; plain `uv sync` drops it).
-- Build the SparkSession only through `storage/spark.py` (`spark_session`); never set `spark.sql.catalog.lake.*` by hand.
+- Build the SparkSession only through `storage/lake/spark.py` (`spark_session`); never set `spark.sql.catalog.lake.*` by hand.
 - Only one `iceberg_tables` may exist in the `eonje` DB (the `iceberg` schema). The JDBC catalog checks for it without a
   schema and silently skips creating it if another schema has one.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.

@@ -105,12 +105,19 @@ eonje/
     client/               # API 클라이언트: 요청 조립, 페이지네이션, 재시도, 응답 검증
     budget/               # 호출 예산: 오늘 사용량 조회, 실행 가능 여부·페이지 상한 판단
     collect/              # 수집 흐름: 완료·지연 확인 → 예산 판단 → 페이지 순회 → 원본 run 쓰기. client·budget·storage를 조합하고, HTTP·파일시스템·DB 세션은 주입받는다
-    storage/
-      raw.py              # 원본 Parquet 경로 규칙, 쓰기(수집) — pyarrow + s3fs
-      spark.py            # SparkSession 생성(설정·Iceberg 카탈로그 주입), s3a 읽기, JDBC 스테이징 쓰기
-      iceberg.py          # Iceberg 테이블 정의(스키마·파티션)의 단일 출처. 멱등한 생성·컬럼 추가로 적용 (3단계)
-      models.py           # SQLAlchemy ORM 모델 (Postgres 스키마 mart·ops의 단일 출처. Alembic autogenerate 대상)
-      db.py               # 엔진·세션, 스테이징 → INSERT ... ON CONFLICT 반영
+    storage/              # 저장소마다 하위 패키지 하나 (2026.11.05 정리)
+      postgres/
+        models.py         # SQLAlchemy ORM 모델 (Postgres 스키마 mart·ops의 단일 출처. Alembic autogenerate 대상)
+        db.py             # 엔진·세션, 스테이징 → INSERT ... ON CONFLICT 반영
+        call_log.py       # api_call_log 기록·조회 (예산 관리자가 읽음)
+      raw/                # 원본 (SeaweedFS Parquet) — pyarrow + s3fs
+        fs.py             # S3 파일시스템, 접속 키 확인
+        paths.py          # 원본 경로 규칙 (run 단위 prefix, 페이지·manifest 경로)
+        writer.py         # 페이지 Parquet 쓰기 (수집)
+        run.py            # run 쓰기와 manifest (완료 표시)
+      lake/               # DW (Iceberg) — Spark
+        spark.py          # SparkSession 생성(설정·Iceberg 카탈로그 주입), s3a 읽기, JDBC 스테이징 쓰기
+        iceberg.py        # Iceberg 테이블 정의(스키마·파티션)의 단일 출처. 멱등한 생성·컬럼 추가로 적용 (3단계)
     transform/            # 순수 함수. Spark DataFrame in → DataFrame out. I/O 없음
       dims.py             # SCD2 비교·갱신 행 생성
       observations.py     # API 어휘 → 내부 어휘, 타입 변환, run 안 중복 제거 (observed_at = run의 collected_at)
@@ -153,7 +160,7 @@ eonje/
 - **API 어휘(`statId`, `chgerId`, `stat`…)는 `observations.py`에서 내부 어휘(`stat_id`, `charger_id`, `status_code`)로 한 번 번역**하고, 그 아래로는 내부 어휘만 쓴다. 응답 필드가 바뀌어도 수정 지점은 한 곳.
 - 설정값은 `config.py`에서만 읽는다. DAG 스케줄 간격도 거기서 가져온다 (DAG 파일은 환경변수를 직접 읽음 — eonje import 불가).
 - **`__init__.py`에는 로직을 두지 않는다.** 전부 빈 파일. re-export도 하지 않아 import는 항상 모듈까지 적는다 (`from eonje.cli.app import main`). `__main__.py`는 위임 두 줄만.
-- **스키마의 단일 출처는 저장소마다 하나.** Postgres(`mart`·`ops`)는 `models.py` — 파이프라인 적재와 API 조회가 같은 모델을 쓰고, Alembic이 여기서 만든다. Iceberg(`stg`·`core`)는 `storage/iceberg.py` — Alembic 대상이 아니므로 정의를 코드로 두고 멱등한 생성(`CREATE TABLE IF NOT EXISTS`)·컬럼 추가 잡(`ensure-iceberg-tables`)으로 적용한다. 두 스키마 모두 CD가 배포 때 적용한다 (8.3).
+- **스키마의 단일 출처는 저장소마다 하나.** Postgres(`mart`·`ops`)는 `models.py` — 파이프라인 적재와 API 조회가 같은 모델을 쓰고, Alembic이 여기서 만든다. Iceberg(`stg`·`core`)는 `storage/lake/iceberg.py` — Alembic 대상이 아니므로 정의를 코드로 두고 멱등한 생성(`CREATE TABLE IF NOT EXISTS`)·컬럼 추가 잡(`ensure-iceberg-tables`)으로 적용한다. 두 스키마 모두 CD가 배포 때 적용한다 (8.3).
 - 대량 적재: Postgres는 Spark → JDBC 스테이징 테이블 → `INSERT ... ON CONFLICT`, Iceberg는 Spark `MERGE INTO`(키가 있는 테이블은 전부. 단순 `append`는 고유 제약이 없어 재실행 시 중복을 만든다). 행 단위 `session.add`는 금지.
 - **Spark 규칙 (처음부터 지킨다):** 데이터는 `s3a://`(SeaweedFS), Iceberg 카탈로그, JDBC로만 읽고 쓴다 — 로컬 경로 금지(다른 노드의 executor가 못 읽음). **Iceberg 테이블은 카탈로그 이름으로만** 읽고 쓴다 (경로로 Parquet을 직접 쓰면 테이블 메타데이터에 안 잡힌다). jar·패키지는 전부 이미지에 넣는다. 큰 데이터에 `collect()`·`toPandas()` 금지. `spark.sql.session.timeZone=Asia/Seoul`을 명시한다.
 
@@ -335,7 +342,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 ### 원본 (Parquet, SeaweedFS, run 단위)
 
-경로 (`storage/raw_paths.py`). 버킷은 `EONJE_RAW_BUCKET`, 접속은 `EONJE_S3_ENDPOINT_URL`·`EONJE_S3_ACCESS_KEY`·`EONJE_S3_SECRET_KEY`. 경로에는 스킴이 없고, 수집기(s3fs)는 그대로, Spark는 `s3a://`를 붙여 쓴다.
+경로 (`storage/raw/paths.py`). 버킷은 `EONJE_RAW_BUCKET`, 접속은 `EONJE_S3_ENDPOINT_URL`·`EONJE_S3_ACCESS_KEY`·`EONJE_S3_SECRET_KEY`. 경로에는 스킴이 없고, 수집기(s3fs)는 그대로, Spark는 `s3a://`를 붙여 쓴다.
 
 ```
 {bucket}/charger_status/dt=YYYY-MM-DD/run=<run_key>/page=NNN.parquet
@@ -352,7 +359,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - 스키마는 페이지에 나온 필드로 정해져 페이지·run마다 컬럼 구성이 다를 수 있다. Spark는 `mergeSchema`로 읽는다 (전부 string이라 타입 충돌 없음)
 - 시각은 모두 시간대가 있어야 하고 UTC로 저장한다. 시간대 없는 시각은 거부
 
-쓰기 규칙 (`storage/raw.py`, `storage/raw_run.py`):
+쓰기 규칙 (`storage/raw/writer.py`, `storage/raw/run.py`):
 - 페이지는 메모리 버퍼에 Parquet(zstd)으로 다 쓴 뒤 한 번에 올린다 → 실패하면 객체가 생기지 않는다
 - run은 `start → write × N → finish`. `start`는 **manifest를 먼저 지우고** run 폴더를 비운다(재실행 때 지난 페이지가 남지 않음). `finish`는 모든 페이지를 쓴 뒤 **`_manifest.json`을 마지막에** 쓴다
 - **manifest가 있는 run만 완료된 run이다.** 읽는 쪽(Spark 워터마크)은 manifest가 없는 run을 건너뛴다. 중간 실패·정리 실패 모두 manifest가 없는 상태로 남는다
@@ -363,11 +370,11 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - manifest가 없는 run(중간 실패)만 run 폴더를 비우고 다시 받는다. 다시 수집하고 싶으면 새 run_id
 - 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 
-### DW (Iceberg `stg`·`core`, `storage/iceberg.py`)
+### DW (Iceberg `stg`·`core`, `storage/lake/iceberg.py`)
 
 - 위치: SeaweedFS `eonje-warehouse` 버킷(`s3a://eonje-warehouse/`). 카탈로그는 Iceberg JDBC 카탈로그로 Postgres `eonje` DB의 `iceberg` 스키마에 둔다. Spark 카탈로그 이름은 `lake` (`lake.stg.obs_status`)
 - 카탈로그 테이블(`iceberg_tables` 등)은 Iceberg가 만든다. Alembic이 지우려 들지 않도록 마이그레이션 비교에서 `iceberg` 스키마를 뺀다
-- 스키마 정의는 `storage/iceberg.py` 하나. 적용은 멱등한 잡(`CREATE TABLE IF NOT EXISTS`, 없는 컬럼만 `ADD COLUMN`). 컬럼 삭제·타입 변경은 하지 않고 새 컬럼으로 옮긴다
+- 스키마 정의는 `storage/lake/iceberg.py` 하나. 적용은 멱등한 잡(`CREATE TABLE IF NOT EXISTS`, 없는 컬럼만 `ADD COLUMN`). 컬럼 삭제·타입 변경은 하지 않고 새 컬럼으로 옮긴다
 - 날짜 파티션은 KST 날짜 컬럼(`*_date`)을 따로 두고 그 값으로 나눈다. Iceberg의 `days()` 변환은 UTC 기준이라 KST 날짜와 어긋난다
 
 | 테이블 | 한 행 (grain) | 키 | 쓰기 방식 | 파티션 | 주요 컬럼 |
@@ -385,7 +392,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - 디멘션 연결: 팩트 시각이 디멘션의 `[valid_from, valid_to)`에 들어가는 버전. 현재 버전은 `valid_to = 9999-12-31`, `is_current = true`
 - 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
 
-### 서빙·운영 (Postgres `eonje` DB, `storage/models.py`)
+### 서빙·운영 (Postgres `eonje` DB, `storage/postgres/models.py`)
 
 | 테이블 | 키 | 쓰기 방식 | 내용 |
 |---|---|---|---|
@@ -491,7 +498,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - **운영은 처음부터 standalone 클러스터, client 모드.** PySpark는 standalone에서 cluster 모드를 지원하지 않는다. 개발 PC도 같은 클러스터 구성이고, `local[*]`은 테스트·빠른 확인용
 - 역할: master = 클러스터 자원 관리자(상시, 하나). 드라이버 = 앱 하나의 지휘자(job마다 생성·소멸, 우리 태스크 컨테이너). worker = executor를 띄우는 노드 데몬. executor = 앱에 배정된 계산 프로세스, 드라이버와 직접 통신
 - master는 A에 고정. 앱마다 `spark.cores.max`·`spark.executor.memory`로 자원을 나눈다
-- **네트워크 (2026.11.03 결정): A 단독일 때는 compose 기본 네트워크(bridge).** master·worker·드라이버가 모두 `eonje_default`에 붙고, `EONJE_SPARK_MASTER=spark://spark-master:7077`, Postgres·SeaweedFS도 collector와 같은 서비스 이름으로 접근. executor가 드라이버에 직접 접속하므로 `spark.driver.host` = 드라이버 컨테이너 IP(`storage/spark.py`가 구함, 컨테이너 hostname은 다른 컨테이너에서 이름으로 찾지 못할 수 있음), `spark.driver.bindAddress=0.0.0.0`
+- **네트워크 (2026.11.03 결정): A 단독일 때는 compose 기본 네트워크(bridge).** master·worker·드라이버가 모두 `eonje_default`에 붙고, `EONJE_SPARK_MASTER=spark://spark-master:7077`, Postgres·SeaweedFS도 collector와 같은 서비스 이름으로 접근. executor가 드라이버에 직접 접속하므로 `spark.driver.host` = 드라이버 컨테이너 IP(`storage/lake/spark.py`가 구함, 컨테이너 hostname은 다른 컨테이너에서 이름으로 찾지 못할 수 있음), `spark.driver.bindAddress=0.0.0.0`
   - host 모드를 처음부터 쓰지 않는 이유: Docker Desktop(Windows)에서 host 네트워크가 제대로 동작하지 않아 드라이버 ↔ executor 연결을 운영에서 처음 검증하게 되고, 호스트에 드라이버·executor·UI 포트가 열린다. B는 측정으로 결정하므로(8.1) 그 전까지는 collector와 같은 방식으로 통일한다
 - A 단독일 때 (`compose.node-a.yaml`): `spark-master`(UI 8090. Airflow api-server의 8080과 겹치지 않게, Airflow UI와 같은 `AIRFLOW_BIND` 주소에만 바인드: 운영은 Tailscale IP, 개발 PC는 127.0.0.1)와 `spark-worker`(코어 2, executor용 메모리 4g, worker UI는 호스트에 열지 않음). 데몬 힙은 각 512m, 컨테이너 `mem_limit`은 master 768m·worker 5g. 셔플·스필(`SPARK_LOCAL_DIRS`)과 worker 작업 폴더는 `spark-work` 볼륨(RAM이 아닌 디스크). 작업 폴더에는 앱마다 executor 로그가 남고 기본으로 지워지지 않으므로, worker 정리를 켜서 끝난 앱의 폴더를 3일 뒤 지운다(`spark.worker.cleanup.enabled`, `appDataTtl=259200`, 검사 주기 30분). 앱은 이 4g 안에서 `spark.executor.memory`를 요청한다(오버헤드를 감안해 3g 정도). Spark 앱은 pool 슬롯 1. scheduler는 Spark에 의존하지 않는다(Spark가 내려가도 수집은 돈다)
 - B 추가 시: B의 executor는 A의 bridge 안 드라이버에 닿을 수 없으므로 Spark 쪽만 host 모드로 전환한다. 바뀌는 것은 spark 서비스와 Spark 태스크의 `network_mode`, `EONJE_SPARK_MASTER=spark://<A 주소>:7077`, `spark.driver.host` = A의 랜 IP, Postgres·SeaweedFS 주소(호스트 포트). 코드 구조는 그대로. B에 worker를 붙이고, 이후 A의 worker를 줄이거나 내린다(미결)
@@ -500,7 +507,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
   - `hadoop-aws` 3.4.2 (Spark 4.1.3의 Hadoop과 같은 버전. 원본 Parquet을 `s3a://`로 읽음, 고아 파일 목록)
   - AWS SDK v2는 **Iceberg 번들의 것 한 벌(2.54.17)**만 둔다. hadoop-aws가 추가로 요구하는 `s3-transfer-manager`, `apache-client`만 같은 버전으로 더한다. Hadoop용 SDK 전체 번들(2.29.x)을 따로 넣으면 같은 클래스가 두 버전으로 섞인다
   - Postgres JDBC 42.7.13 (JDBC 카탈로그)
-- Iceberg 카탈로그 설정(`spark.sql.catalog.lake.*`)은 `storage/spark.py`가 설정값으로 주입한다. PoC로 확인한 필수 값: `catalog-impl=JdbcCatalog`, `jdbc.schema-version=V1`(1.12는 없으면 거부), `io-impl=S3FileIO`, `s3.endpoint`, `s3.path-style-access=true`, 키 이름은 `s3.access-key-id`·`s3.secret-access-key`(짧은 이름은 조용히 무시됨), `client.region`(아무 값이나, SDK가 요구). Hadoop 쪽은 `fs.s3a.*`(endpoint, path style, endpoint가 `https`일 때만 SSL, Simple 자격 증명)와 `fs.s3.impl=S3AFileSystem`(Iceberg의 `s3://` 경로를 Hadoop이 다룰 때). JDBC 비밀번호는 URL에 넣지 않고 `jdbc.password`로 따로 넘긴다. 설정 계산(`spark_conf`)은 순수 함수라 키 이름을 단위 테스트로 지킨다
+- Iceberg 카탈로그 설정(`spark.sql.catalog.lake.*`)은 `storage/lake/spark.py`가 설정값으로 주입한다. PoC로 확인한 필수 값: `catalog-impl=JdbcCatalog`, `jdbc.schema-version=V1`(1.12는 없으면 거부), `io-impl=S3FileIO`, `s3.endpoint`, `s3.path-style-access=true`, 키 이름은 `s3.access-key-id`·`s3.secret-access-key`(짧은 이름은 조용히 무시됨), `client.region`(아무 값이나, SDK가 요구). Hadoop 쪽은 `fs.s3a.*`(endpoint, path style, endpoint가 `https`일 때만 SSL, Simple 자격 증명)와 `fs.s3.impl=S3AFileSystem`(Iceberg의 `s3://` 경로를 Hadoop이 다룰 때). JDBC 비밀번호는 URL에 넣지 않고 `jdbc.password`로 따로 넘긴다. 설정 계산(`spark_conf`)은 순수 함수라 키 이름을 단위 테스트로 지킨다
 - **카탈로그 스키마 `iceberg`는 Alembic 마이그레이션이 만들고**, 그 안의 테이블(`iceberg_tables`, `iceberg_namespace_properties`)은 Iceberg가 처음 연결될 때 만든다. Alembic은 `env.py`의 `include_name`으로 이 스키마를 비교 대상에서 뺀다
   - **`eonje` DB 전체에 `iceberg_tables`는 하나만 있어야 한다.** JDBC 카탈로그는 장부 테이블이 있는지 스키마를 지정하지 않고 확인해서, 다른 스키마(예: PoC의 `iceberg_poc`)에 같은 이름이 있으면 만들지 않고 넘어간 뒤 `iceberg` 스키마에서 찾지 못해 실패한다 (2026.11.05 개발 DB에서 확인, `iceberg_poc` 삭제로 해결). 테스트용 카탈로그가 필요하면 다른 DB에 둔다
 - **`spark-check` 잡**: 드라이버 → master → executor 계산(`range` 후 파티션을 나눠 count)과 카탈로그 조회(`SHOW NAMESPACES IN lake`)만 하고 쓰지 않는다. 개발 PC는 `make spark-check`, 운영은 배포 마지막 단계(8.3). 실패하면 Spark 쪽 인프라(네트워크, jar, 카탈로그 설정) 문제다. 원본 `s3a://` 읽기는 원본을 읽는 첫 변환 잡이 검증한다
@@ -604,7 +611,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. 이어서 `storage/iceberg.py`, `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
+| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. 이어서 `storage/lake/iceberg.py`, `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |

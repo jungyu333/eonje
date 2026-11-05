@@ -52,9 +52,9 @@ Review the current branch against `main` following the project's boundary and da
 - [ ] Page loops are bounded (`totalCount`-derived) and retry per page, not per run
 
 ### Schema
-- [ ] Changes to `storage/models.py` have a matching Alembic migration
+- [ ] Changes to `storage/postgres/models.py` have a matching Alembic migration
 - [ ] Postgres bulk loads use `insert(...).on_conflict_do_*` via a staging table, not per-row `session.add`
-- [ ] Changes to Iceberg tables go through `storage/iceberg.py` (additive only), not ad-hoc DDL
+- [ ] Changes to Iceberg tables go through `storage/lake/iceberg.py` (additive only), not ad-hoc DDL
 
 ### Testing
 - [ ] New `transform/` functions have unit tests using `tests/fixtures/`
