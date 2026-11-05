@@ -528,7 +528,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
 - **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Spark 이미지 스모크(`--help`에 잡 목록, `spark-class` Master 실행), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres). PR에서만 새 push가 진행 중인 실행을 취소한다 (main 실행은 배포 도중 끊기지 않게)
 - **바뀐 파일에 따라 job을 고른다** (`changes` job, `dorny/paths-filter`): Python 검사는 `.py`·의존성이 바뀔 때, collector 이미지는 `eonje/`·마이그레이션·Dockerfile, Airflow 이미지는 `dags/`·`docker/airflow/`, DB 테스트는 `eonje/`·`tests/`·`infra/`가 바뀔 때만. 건너뛴 job은 통과로 친다. `ci.yml`이 바뀌면 전부 돈다
-- **배포할 것이 없으면 배포하지 않는다**: main push가 `eonje/`·`dags/`·`docker/`·`infra/`·의존성·`deploy.yml`을 건드릴 때만 이미지를 전부 빌드해 푸시하고 배포한다. 문서·테스트만 바뀐 머지는 검사만 돌고 끝난다 (배포마다 Airflow 컨테이너가 새 sha로 다시 만들어지므로 불필요한 재시작을 줄인다)
+- **배포할 것이 없으면 배포하지 않는다**: main push가 `eonje/`·`dags/`·`docker/`·`infra/`·의존성·`deploy.yml`을 건드릴 때만 이미지를 전부 빌드해 푸시하고 배포한다. 문서·테스트만 바뀐 머지는 검사만 돌고 끝난다 (배포마다 Airflow 컨테이너가 새 sha로 다시 만들어지므로 불필요한 재시작을 줄인다). 배포 job은 `publish` 성공만 본다. 조건이 없으면 기본 `success()`가 skipped된 조상 job(예: `.py` 변경이 없어 건너뛴 `check`) 때문에 배포를 건너뛴다 (2026.11.05 #18에서 발견, 그 배포는 수동 실행)
 - **이미지 푸시** (main, CI 전부 통과 후): `ghcr.io/jungyu333/eonje-collector`·`eonje-airflow`·`eonje-spark`를 `<sha>`와 `main` 태그로. 배포는 항상 sha로 고른다. 워크플로 기본 권한은 `contents: read`, 푸시 잡만 `packages: write`. 패키지는 서버가 인증 없이 pull하도록 public이어야 한다. 공개 레포에서 워크플로가 처음 푸시한 패키지는 레포를 따라 public으로 생성된다(`eonje-spark`에서 확인, 2026.11.05). private으로 생기면 Package settings에서 public으로 바꾼다
 - **CD** (`.github/workflows/deploy.yml`, CI가 이미지 푸시 뒤 호출. 수동 실행도 가능):
   1. sha 형식과 그 sha의 이미지가 GHCR에 있는지 확인

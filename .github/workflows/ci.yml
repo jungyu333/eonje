@@ -284,6 +284,9 @@ jobs:
   # main only: roll the pushed images out to node A and then move the deploy branch.
   deploy:
     needs: publish
+    # Without an if, the default success() also looks at jobs above publish, so a skipped
+    # check (no .py change) would skip the deploy even though publish succeeded.
+    if: ${{ !failure() && !cancelled() && needs.publish.result == 'success' }}
     permissions:
       contents: write
     uses: ./.github/workflows/deploy.yml
