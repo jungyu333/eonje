@@ -53,6 +53,9 @@ esac
 
 "${compose[@]}" up -d --wait --remove-orphans
 
+echo "spark check"
+timeout 300 "${compose[@]}" run --rm -T spark-check < /dev/null
+
 # 성공했을 때만 태그 파일을 갱신한다
 [[ -f image.env ]] && cp image.env image.env.prev
 mv image.env.next image.env

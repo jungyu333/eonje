@@ -24,6 +24,11 @@ x-airflow: &airflow
     postgres:
       condition: service_healthy
 
+x-spark: &spark
+  image: ${EONJE_IMAGE_REPO:-eonje}-spark:${EONJE_IMAGE_TAG:-dev}
+  restart: unless-stopped
+  entrypoint: [ spark-class ]
+
 services:
   postgres:
     image: postgres:16
@@ -69,6 +74,49 @@ services:
       timeout: 3s
       retries: 20
 
+  spark-master:
+    <<: *spark
+    command:
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8090"            # Airflow api-server(8080)와 겹치지 않게
+    environment:
+      SPARK_DAEMON_MEMORY: 512m
+    ports:
+      - "${UI_BIND:-127.0.0.1}:8090:8090"   # ← airflow-api-server와 같은 bind 변수로
+    healthcheck:
+      test: [ "CMD", "curl", "-fs", "http://localhost:8090" ]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    mem_limit: 768m
+
+  # executor를 띄우는 노드 데몬. A 단독일 때 코어 2, executor용 메모리 4g (B 추가 전)
+  spark-worker:
+    <<: *spark
+    command:
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --cores
+      - "2"
+      - --memory
+      - 4g
+      - --webui-port
+      - "8091"            # 호스트에 열지 않는다. 상태는 master UI에서 본다
+    environment:
+      SPARK_DAEMON_MEMORY: 512m
+      SPARK_LOCAL_DIRS: /tmp/spark-local     # 셔플·스필
+    volumes:
+      - spark-work:/tmp   # SPARK_WORKER_DIR(/tmp/spark-work)와 셔플을 RAM이 아닌 디스크에
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    mem_limit: 5g         # 데몬 0.5 + executor 최대 4 + 여유
+
   migrate:
     image: ${EONJE_IMAGE_REPO:-eonje}-collector:${EONJE_IMAGE_TAG:-dev}
     profiles: [ "tools" ]
@@ -78,6 +126,27 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  # Spark 경로 확인 (spark-check 잡): executor 계산 + Iceberg 카탈로그. 쓰기 없음
+  # CLI가 run 인자를 요구하므로 run_after는 실행 시각으로 넘긴다 (잡은 쓰지 않음)
+  spark-check:
+    image: ${EONJE_IMAGE_REPO:-eonje}-spark:${EONJE_IMAGE_TAG:-dev}
+    profiles: [ "tools" ]
+    env_file: ../.env
+    environment:
+      EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD:?set EONJE_DB_PASSWORD in .env}@postgres:5432/eonje
+      EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_SPARK_MASTER: spark://spark-master:7077
+    entrypoint: [ "sh", "-c" ]
+    command:
+      - exec python -m eonje.cli spark-check --run-id spark-check --run-after "$$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
 
   airflow-init:
     <<: *airflow
@@ -122,6 +191,7 @@ services:
       # 컨테이너 네트워크 안 주소로 덮어씀 (.env의 127.0.0.1은 호스트용)
       EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD}@postgres:5432/eonje
       EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_SPARK_MASTER: spark://spark-master:7077
     group_add:
       - "${DOCKER_GID:-0}"                # docker.sock 접근
     volumes:
@@ -166,3 +236,4 @@ volumes:
   pgdata:
   seaweed:
   airflow-logs:
+  spark-work:

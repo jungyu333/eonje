@@ -91,13 +91,15 @@ DOCKER_GID=0   # Docker Desktop. Linux는 getent group docker | cut -d: -f3
 ```
 
 ```bash
-make build        # eonje-collector:dev, eonje-airflow:dev
+make build        # eonje-collector:dev, eonje-airflow:dev, eonje-spark:dev
 make up
 make dags-check   # DAG import 오류 확인. "No data found"면 정상
 make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있으면 됨, make up 불필요)
+make spark-check  # Spark 경로 확인: executor 계산 + Iceberg 카탈로그. "catalog ok"면 정상
 ```
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
+- Spark master UI: http://127.0.0.1:8090 (Workers 1, Cores 2, Memory 4.0 GiB면 정상)
 - `ev_status_10min`은 **멈춘 상태(paused)로 등록**되고, 개발 PC에서는 켜지 않는다. 켜면 10분마다 수집한다
 - 한 번 실행해 보려면 `airflow dags test`를 쓴다. 스케줄러를 거치지 않고 그 자리에서 끝까지 돌려서, DAG가 멈춰 있어도 된다
 
@@ -122,6 +124,7 @@ main에 머지되면 CI가 이미지를 GHCR에 푸시하고 eonje-a에 배포�
 | 대상 | 접근 |
 |---|---|
 | Airflow UI | tailnet 안에서 `http://eonje-a:8080` |
+| Spark master UI | tailnet 안에서 `http://eonje-a:8090` (worker·실행 중인 앱) |
 | Postgres | SSH 터널 (`ssh -N -L 15432:127.0.0.1:5432 eonje-a` 또는 PyCharm Database의 SSH 탭). 읽기 전용으로 연결 |
 | SeaweedFS S3 | SSH 터널 (`-L 18333:127.0.0.1:8333`, Big Data Tools의 터널 옵션). endpoint `127.0.0.1`, path-style |
 | SeaweedFS filer UI | 필요할 때만 `-L 18888:127.0.0.1:8888` → `http://localhost:18888` (로그인 없이 삭제 가능하니 주의) |

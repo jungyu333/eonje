@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify poc-iceberg
+.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -41,7 +41,7 @@ check: lint typecheck test   ## CI와 동일한 전체 검사
 build:           ## eonje 이미지 빌드
 	docker build -f docker/tasks/collector/Dockerfile -t eonje-collector:$(TAG) .
 	docker build -f docker/airflow/Dockerfile -t eonje-airflow:$(TAG) docker/airflow
-	docker build -f docker/tasks/spark/Dockerfile -t eonje-spark:$(TAG) docker/tasks/spark
+	docker build -f docker/tasks/spark/Dockerfile -t eonje-spark:$(TAG) .
 
 run:             ## job 실행. 예: make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
 	$(if $(and $(JOB),$(RUN_ID),$(RUN_AFTER)),,$(error usage: make run JOB=<job> RUN_ID=<id> RUN_AFTER=<ISO 8601 with offset like 2026-10-28T01:10:00+00:00>))
@@ -91,9 +91,5 @@ dag-pause:       ## DAG 끄기 (실수로 켰을 때). 예: make dag-pause DAG=e
 	$(if $(DAG),,$(error usage: make dag-pause DAG=<dag_id>))
 	$(COMPOSE) exec airflow-scheduler airflow dags pause $(DAG)
 
-# MSYS_NO_PATHCONV: Windows Git Bash가 /poc/... 인자를 바꾸지 않게
-poc-iceberg:     ## 3단계 PoC: SeaweedFS+Spark+Iceberg 호환성 확인 (make up, make buckets, make build 먼저). 남기려면 ARGS=--keep
-	MSYS_NO_PATHCONV=1 docker run --rm --network eonje_default --env-file .env \
-		-e EONJE_S3_ENDPOINT_URL=http://seaweedfs:8333 \
-		-v "$(CURDIR)/scripts/poc:/poc:ro" \
-		eonje-spark:$(TAG) python /poc/iceberg_seaweedfs.py $(ARGS)
+spark-check:     ## Spark 경로 확인: executor 계산 + Iceberg 카탈로그 (make build 후)
+	$(COMPOSE) run --rm -T spark-check < /dev/null

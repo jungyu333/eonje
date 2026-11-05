@@ -1,18 +1,14 @@
 # eonje-spark: Spark 드라이버·master·worker 공용 이미지 (명령만 다름)
-# 3단계 PoC 단계: Spark + Iceberg + SeaweedFS(S3) + JDBC 카탈로그 호환성 확인용.
-# eonje 패키지는 아직 넣지 않는다 (Spark 실행 기반 PR에서 추가).
+#  - 드라이버: DockerOperator가 `eonje <job>`으로 실행 (ENTRYPOINT)
+#  - master·worker: compose에서 entrypoint를 spark-class로 바꿔 실행
 #
-# 버전 조합 (2026.11 기준)
-#  - Spark 4.1.3: Iceberg 1.12가 정식 runtime을 배포한 최신 계열. Iceberg 빌드가 4.1.3으로 검증됨
-#  - Iceberg 1.12.0: iceberg-spark-runtime-4.1_2.13 + iceberg-aws-bundle(S3FileIO, AWS SDK v2 포함)
-#  - hadoop-aws 3.4.2: Spark 4.1.3에 들어 있는 Hadoop과 같은 버전. 원본 Parquet을 s3a://로 읽는 데 필요
-#    AWS SDK는 iceberg-aws-bundle의 것 한 벌만 쓴다. hadoop-aws가 추가로 요구하는 모듈
-#    (s3-transfer-manager, apache-client)만 같은 SDK 버전(Iceberg 1.12 빌드의 awssdk-bom 2.54.17)으로 넣는다.
-#    apache-client가 쓰는 Apache HttpClient 4.x는 Spark에 이미 들어 있다
-#  - Java 21(Debian trixie 기본), Python 3.11(eonje와 같음)
+# 버전 조합 (2026.11 기준, 근거와 PoC 결과는 docs/design.md 8.2)
+#  - Spark 4.1.3 (pyproject의 spark extra), Iceberg 1.12.0, hadoop-aws 3.4.2 (Spark의 Hadoop과 같은 버전)
+#  - AWS SDK v2는 iceberg-aws-bundle의 것 한 벌(2.54.17). hadoop-aws가 더 요구하는
+#    s3-transfer-manager, apache-client만 같은 버전으로 넣는다
+#  - Java 21 (Debian trixie 기본), Python 3.11 (eonje와 같음)
 FROM python:3.11-slim-trixie
 
-ARG SPARK_VERSION=4.1.3
 ARG ICEBERG_VERSION=1.12.0
 ARG HADOOP_VERSION=3.4.2
 ARG POSTGRES_JDBC_VERSION=42.7.13
@@ -22,17 +18,27 @@ ARG MAVEN=https://repo1.maven.org/maven2
 RUN apt-get update \
  && apt-get install -y --no-install-recommends default-jre-headless procps curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-ENV JAVA_HOME=/usr/lib/jvm/default-java
 
-# pip pyspark에는 Spark jar와 spark-submit·spark-class(master·worker 실행)가 함께 들어 있다
-# pyiceberg·duckdb: Spark 밖에서 같은 테이블을 복사 없이 읽는지 확인용 (PoC)
-RUN pip install --no-cache-dir \
-      "pyspark==${SPARK_VERSION}" \
-      "pyiceberg[pyarrow,sql-postgres,s3fs]==0.12.0" \
-      "duckdb==2.0.0"
+COPY --from=ghcr.io/astral-sh/uv:0.9.11 /uv /bin/uv
 
-# 추가 jar를 pyspark의 jars 폴더에 넣어 driver·executor 클래스패스에 기본으로 올린다.
-# 실행 중 내려받지 않는다 (CLAUDE.md Spark 규칙). Maven의 sha1로 무결성 확인
+# SPARK_WORKER_DIR: 기본값($SPARK_HOME/work)은 venv 안이라 app 사용자가 쓸 수 없다
+ENV JAVA_HOME=/usr/lib/jvm/default-java \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH="/app/.venv/bin:$PATH" \
+    SPARK_WORKER_DIR=/tmp/spark-work
+
+WORKDIR /app
+
+# 1. 의존성 (pyspark 포함). 코드보다 먼저 두어 코드만 바뀌면 이 층과 jar 층은 캐시를 쓴다
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-dev --extra spark --no-install-project
+
+# 2. 추가 jar를 pyspark의 jars 폴더에 넣어 driver·executor 클래스패스에 기본으로 올린다.
+#    실행 중 내려받지 않는다 (CLAUDE.md Spark 규칙). Maven의 sha1로 무결성 확인
 RUN set -eu; \
     jars="$(python -c 'import os, pyspark; print(os.path.join(os.path.dirname(pyspark.__file__), "jars"))')"; \
     fetch() { \
@@ -45,9 +51,16 @@ RUN set -eu; \
     fetch "org/apache/hadoop/hadoop-aws/${HADOOP_VERSION}/hadoop-aws-${HADOOP_VERSION}.jar"; \
     fetch "software/amazon/awssdk/s3-transfer-manager/${AWS_SDK_VERSION}/s3-transfer-manager-${AWS_SDK_VERSION}.jar"; \
     fetch "software/amazon/awssdk/apache-client/${AWS_SDK_VERSION}/apache-client-${AWS_SDK_VERSION}.jar"; \
-    fetch "org/postgresql/postgresql/${POSTGRES_JDBC_VERSION}/postgresql-${POSTGRES_JDBC_VERSION}.jar"; \
-    ls -1 "$jars" | grep -E 'iceberg|hadoop-(aws|client)|postgresql|transfer|apache-client|httpclient|httpcore|bundle'
+    fetch "org/postgresql/postgresql/${POSTGRES_JDBC_VERSION}/postgresql-${POSTGRES_JDBC_VERSION}.jar"
+
+# 3. eonje 코드
+COPY pyproject.toml uv.lock ./
+COPY eonje/ eonje/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --extra spark
 
 RUN useradd --create-home --uid 10001 app
 USER app
-WORKDIR /home/app
+
+ENTRYPOINT ["python", "-m", "eonje.cli"]

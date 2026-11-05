@@ -29,12 +29,20 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    """Alembic 비교 대상에서 iceberg 스키마를 뺀다 (Iceberg JDBC 카탈로그가 관리)."""
+    if type_ == "schema":
+        return name != "iceberg"
+    return True
+
+
 def _run_with(connection: Connection) -> None:
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
         compare_server_default=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -60,6 +68,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_name=include_name,
     )
 
     with context.begin_transaction():

@@ -37,7 +37,7 @@ jobs:
       - name: check sha and images
         run: |
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "full 40-char commit sha required: $SHA"; exit 1; }
-          for image in eonje-collector eonje-airflow; do
+          for image in eonje-collector eonje-airflow eonje-spark; do
             docker manifest inspect "$REGISTRY/$image:$SHA" > /dev/null \
               || { echo "missing $REGISTRY/$image:$SHA"; exit 1; }
           done
