@@ -7,8 +7,8 @@ import httpx
 from eonje.cli import exit_codes
 from eonje.cli.context import JobContext
 from eonje.collect.delta import DeltaResult, Outcome, collect_delta
-from eonje.storage.db import make_engine, make_session_factory
-from eonje.storage.fs import raw_filesystem
+from eonje.storage.postgres.db import make_engine, make_session_factory
+from eonje.storage.raw.fs import raw_filesystem
 
 JOB = "fetch-delta"
 

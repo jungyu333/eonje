@@ -26,7 +26,7 @@ Procedure:
 
 Hard rules:
 - You edit files under `tests/` only. Never modify `eonje/`, `api/`, `dags/`, `infra/`, or docs. If the code needs a change to be testable, describe it; do not make it.
-- No network, no real DB in unit tests. Mock `httpx` at the transport level; mock DB access at the `storage/db.py` boundary.
+- No network, no real DB in unit tests. Mock `httpx` at the transport level; mock DB access at the `storage/postgres/db.py` boundary.
 - No test relies on wall-clock time; pass timestamps explicitly or freeze them.
 - Do not test ruff-enforced style or type hints.
 - Never run git commands that change the working tree or index (stash, checkout, reset, restore, add). Read-only git (diff, log, show, status) only. To compare against another version, use `git show <rev>:<path>` into a scratch file.

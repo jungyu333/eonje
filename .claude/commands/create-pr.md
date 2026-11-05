@@ -60,6 +60,6 @@ Create a pull request for the current branch following the project's Git & PR co
 - Always target `main` as the base branch
 - One logical change per PR
 - **PR title must follow Conventional Commits** — it becomes the squash-merged commit on `main`
-- If the PR changes `storage/models.py`, it must include the Alembic migration
+- If the PR changes `storage/postgres/models.py`, it must include the Alembic migration
 - If the PR changes a design decision, update `docs/design.md` in the same PR
 - Keep pipeline logic (`eonje/`) and DAG wiring (`dags/`) in separate PRs when they can be reviewed independently

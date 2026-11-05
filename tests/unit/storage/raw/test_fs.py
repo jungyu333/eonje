@@ -3,7 +3,7 @@ from typing import Any
 import pytest
 
 from eonje.config import Settings
-from eonje.storage.fs import raw_filesystem
+from eonje.storage.raw.fs import raw_filesystem
 
 ACCESS_KEY = "test-access-key"
 SECRET_KEY = "test-secret-key"

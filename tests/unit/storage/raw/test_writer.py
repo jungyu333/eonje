@@ -10,10 +10,10 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 from eonje.client.response import parse_response
 from eonje.client.types import Page
-from eonje.storage.raw import META_FIELDS, page_table, write_page
-from eonje.storage.raw_paths import RawRun, page_path
+from eonje.storage.raw.paths import RawRun, page_path
+from eonje.storage.raw.writer import META_FIELDS, page_table, write_page
 
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "evcharger"
+FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "evcharger"
 BUCKET = "eonje-raw"
 KST = timezone(timedelta(hours=9))
 COLLECTED_AT = datetime(2026, 10, 26, 10, 10, 0, tzinfo=UTC)

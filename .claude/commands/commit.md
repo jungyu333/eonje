@@ -50,7 +50,7 @@ build: pin pandas and pyarrow versions
 | --- | --- |
 | `client` | `eonje/client/**` |
 | `budget` | `eonje/budget/**` |
-| `storage` | `eonje/storage/**` (raw, models, db) |
+| `storage` | `eonje/storage/**` (postgres, raw, lake) |
 | `transform` | `eonje/transform/**` |
 | `codes` | `eonje/codes/**` |
 | `cli` | `eonje/cli/**` (app, registry, jobs) |
@@ -73,7 +73,7 @@ git commit -m "feat(client): add period-based delta fetch"
 git commit -m "feat(dags): wire fetch_delta task into ev_status_10min"
 ```
 
-Schema changes (`storage/models.py`) and their Alembic migration go in the **same** commit.
+Schema changes (`storage/postgres/models.py`) and their Alembic migration go in the **same** commit.
 
 ## Rules
 - Never commit to `main` directly

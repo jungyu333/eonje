@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 from eonje.cli.context import JobContext
-from eonje.storage.spark import CATALOG, spark_session
+from eonje.storage.lake.spark import CATALOG, spark_session
 
 log = logging.getLogger(__name__)
 

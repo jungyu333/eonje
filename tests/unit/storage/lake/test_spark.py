@@ -1,7 +1,7 @@
 import pytest
 
 from eonje.config import Settings
-from eonje.storage.spark import CATALOG, jdbc_url, spark_conf
+from eonje.storage.lake.spark import CATALOG, jdbc_url, spark_conf
 
 DB_PASSWORD = "db-pw-should-not-leak"
 DB_URL = f"postgresql+psycopg://eonje:{DB_PASSWORD}@postgres:5432/eonje"

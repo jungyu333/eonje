@@ -4,7 +4,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Dialect
 from sqlalchemy.schema import CreateTable
 
-from eonje.storage.models import NAMING_CONVENTION, ApiCallLog, Base
+from eonje.storage.postgres.models import NAMING_CONVENTION, ApiCallLog, Base
 
 REQUIRED_COLUMNS = [
     "id",
