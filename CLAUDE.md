@@ -90,7 +90,11 @@ docs/         # design.md, requirements.md
   subqueries in `MERGE ... ON` (`t.observed_date IN (date'2026-11-03', ...)` plus the
   key). Matching on the key alone scans the whole, ever-growing table every run.
 - No `collect()` / `toPandas()` on large data. Set `spark.sql.session.timeZone=Asia/Seoul`.
-- jars and packages are baked into the `eonje-spark` image; never fetched at runtime.
+- jars and packages are baked into the `eonje-spark` image; never fetched at runtime. pyspark is the `spark` extra
+  (`make install` installs it; plain `uv sync` drops it).
+- Build the SparkSession only through `storage/spark.py` (`spark_session`); never set `spark.sql.catalog.lake.*` by hand.
+- Only one `iceberg_tables` may exist in the `eonje` DB (the `iceberg` schema). The JDBC catalog checks for it without a
+  schema and silently skips creating it if another schema has one.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
 
 ## Runtime & Deployment
