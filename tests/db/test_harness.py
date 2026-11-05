@@ -1,14 +1,17 @@
 """Sanity checks for the DB test harness in tests/db/conftest.py."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, text
 from sqlalchemy.orm import Session, sessionmaker
 
 pytestmark = pytest.mark.db
 
-HEAD_REVISION = "30e8abb95390"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _INSERT_CALL_LOG = text(
     """
@@ -19,6 +22,16 @@ _INSERT_CALL_LOG = text(
     """
 )
 _FIXED_CALLED_AT = datetime(2026, 10, 27, 0, 0, tzinfo=UTC)
+
+
+def _head_revision() -> str | None:
+    """Head of the migration scripts, read from the files so a new migration needs no test edit.
+
+    A single head is asserted in tests/unit/test_migrations.py.
+    """
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "infra" / "migrations"))
+    return ScriptDirectory.from_config(cfg).get_current_head()
 
 
 def _count_call_log(conn: Connection) -> int:
@@ -57,8 +70,8 @@ def test_alembic_version_is_at_head(connection: Connection, schema: str) -> None
         .all()
     )
 
-    # THEN exactly the head revision is recorded
-    assert revisions == [HEAD_REVISION]
+    # THEN exactly the head revision of the migration scripts is recorded
+    assert revisions == [_head_revision()]
 
 
 @pytest.mark.parametrize("run_id", ["isolation-first", "isolation-second"])
