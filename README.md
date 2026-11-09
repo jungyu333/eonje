@@ -54,7 +54,7 @@ S3 키는 SeaweedFS가 이 값으로 계정을 만들므로 아무 값이나 정
 ```bash
 make up        # Postgres + SeaweedFS
 make migrate   # eonje DB에 테이블 생성
-make buckets   # 원본 버킷 생성 (이미 있으면 그대로 성공)
+make buckets   # 원본·웨어하우스 버킷 생성 (이미 있으면 그대로 성공)
 ```
 
 **3. 수집 1회**
@@ -96,6 +96,7 @@ make up
 make dags-check   # DAG import 오류 확인. "No data found"면 정상
 make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있으면 됨, make up 불필요)
 make spark-check  # Spark 경로 확인: executor 계산 + Iceberg 카탈로그. "catalog ok"면 정상
+make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번째부터는 "unchanged=3"
 ```
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`

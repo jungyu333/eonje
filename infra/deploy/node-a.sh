@@ -3,7 +3,8 @@
 # CD가 이 파일을 서버에 복사한 뒤 deploy 계정으로 실행한다:  ssh deploy@eonje-a "bash eonje/infra/deploy/node-a.sh <sha>"
 # (bash -s로 표준입력에 흘려 넣지 않는다: docker compose run/exec가 남은 스크립트를 표준입력으로 먹어 버린다)
 #
-# 순서: 이미지 받기 → 저장소 기동 → 실행 중인 태스크 대기 → 마이그레이션 → 버킷 → 전체 기동(헬스체크 대기)
+# 순서: 이미지 받기 → 저장소 기동 → 실행 중인 태스크 대기 → 마이그레이션 → 버킷(원본·웨어하우스)
+#       → 전체 기동(헬스체크 대기) → Iceberg 테이블 → Spark 확인
 # 마이그레이션이나 기동이 실패하면 여기서 멈추고 image.env는 직전 성공 sha를 유지한다.
 # 롤백은 직전 sha(image.env.prev)로 다시 배포하면 된다.
 set -euo pipefail
@@ -42,16 +43,19 @@ done
 
 # 버킷이 이미 있으면 weed shell이 0이 아닌 코드로 끝날 수 있다. 판단은 출력으로 하고,
 # set -e가 출력을 보여 주기도 전에 스크립트를 끝내지 않게 || true를 붙인다
-echo "ensure bucket"
-bucket_out=$("${compose[@]}" exec -T seaweedfs sh -c \
-  'echo "s3.bucket.create -name ${EONJE_RAW_BUCKET:-eonje-raw}" | weed shell' 2>&1 < /dev/null) || true
+echo "ensure buckets"
+bucket_out=$("${compose[@]}" exec -T seaweedfs sh -c '
+  for b in "${EONJE_RAW_BUCKET:-eonje-raw}" "${EONJE_WAREHOUSE_BUCKET:-eonje-warehouse}"; do
+    echo "s3.bucket.create -name $b" | weed shell
+  done' 2>&1 < /dev/null) || true
 echo "$bucket_out"
-case "$bucket_out" in
-  *"created bucket"*|*"already exists"*) ;;
-  *) echo "bucket check failed" >&2; exit 1 ;;
-esac
+ok=$(grep -cE "created bucket|already exists" <<< "$bucket_out" || true)
+[[ "$ok" -eq 2 ]] || { echo "bucket check failed" >&2; exit 1; }
 
 "${compose[@]}" up -d --wait --remove-orphans
+
+echo "ensure iceberg tables"
+timeout 300 "${compose[@]}" run --rm -T ensure-iceberg-tables < /dev/null
 
 echo "spark check"
 timeout 300 "${compose[@]}" run --rm -T spark-check < /dev/null

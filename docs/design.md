@@ -374,7 +374,8 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 - 위치: SeaweedFS `eonje-warehouse` 버킷(`s3a://eonje-warehouse/`). 카탈로그는 Iceberg JDBC 카탈로그로 Postgres `eonje` DB의 `iceberg` 스키마에 둔다. Spark 카탈로그 이름은 `lake` (`lake.stg.obs_status`)
 - 카탈로그 테이블(`iceberg_tables` 등)은 Iceberg가 만든다. Alembic이 지우려 들지 않도록 마이그레이션 비교에서 `iceberg` 스키마를 뺀다
-- 스키마 정의는 `storage/lake/iceberg.py` 하나. 적용은 멱등한 잡(`CREATE TABLE IF NOT EXISTS`, 없는 컬럼만 `ADD COLUMN`). 컬럼 삭제·타입 변경은 하지 않고 새 컬럼으로 옮긴다
+- 스키마 정의는 `storage/lake/iceberg.py` 하나(`TABLES`). 적용은 멱등한 잡 `ensure-iceberg-tables`(`CREATE TABLE IF NOT EXISTS`, 없는 컬럼만 `ADD COLUMNS`). 컬럼 삭제·타입 변경은 하지 않고 새 컬럼으로 옮긴다. 기존 테이블에 추가하는 컬럼은 nullable이어야 한다(NOT NULL은 데이터가 있는 테이블에 추가할 수 없어 잡이 거부한다). 그래서 타입은 처음 만들 때 실제 응답으로 확인하고 정한다
+- 테이블 속성 기본값: `format-version=2`, 쓰기(merge·update·delete)는 `copy-on-write`. 차원은 작고 하루 한 번 바뀌어 읽기가 단순한 쪽을 택했다. 10분마다 쓰는 팩트 테이블은 4단계에서 따로 정한다
 - 날짜 파티션은 KST 날짜 컬럼(`*_date`)을 따로 두고 그 값으로 나눈다. Iceberg의 `days()` 변환은 UTC 기준이라 KST 날짜와 어긋난다
 
 | 테이블 | 한 행 (grain) | 키 | 쓰기 방식 | 파티션 | 주요 컬럼 |
@@ -382,8 +383,8 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 | `stg.obs_status` | 충전기 1대가 한 run에서 관측된 1회 (`observed_at` = run의 `collected_at`) | `stat_id, charger_id, run_key` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 적재 전 run 안 중복(페이징 드리프트)은 키당 하나로 줄이고, 고르는 기준은 결정적이어야 한다: `stat_upd_dt`가 늦은 행 → `page_no`가 큰 행(나중에 받은 페이지) → 그래도 같으면 나머지 컬럼 값의 사전순. 원본에서 다시 만들어도 같은 행이 남는다. run이 달라 같은 보고가 다시 보이면 별개의 관측으로 남긴다. 키에 `observed_at`이 아니라 `run_key`를 쓰는 이유: `collected_at`은 Airflow 논리 시각(`run_after`)이라 delta run과 full run이 같은 시각을 가질 수 있다 | `observed_date` | `status_code`, `stat_upd_dt`, `last_ts`, `last_te`, `now_ts`, `source`(delta/full), `run_key` |
 | `core.evt_transition` | 충전기 1대의 상태 변화 1회 (그것을 발견한 run 하나에 속함) | `stat_id, charger_id, at, run_key` | 추가만. 키가 이미 있으면 무시 (`MERGE ... WHEN NOT MATCHED INSERT`). 놓친 전이는 `source=reconciled` 새 행으로 | `at_date` | `from_status`, `to_status`, `at`(전이 추정 시각), `detected_at`, `source`(observed/reconciled) |
 | `core.fact_session` | 충전 세션 1회 | `stat_id, charger_id, started_at` | `MERGE` (진행 중 세션이 끝나면 갱신) | `started_date` | `ended_at`, `duration_min`, `source`(last_ts/now_ts) |
-| `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (`MERGE`: 바뀐 행은 현재 버전을 닫고 새 버전 추가) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한, `valid_to`, `is_current` |
-| `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 (`MERGE`) | 없음 | 타입·출력·방식·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current` |
+| `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (`MERGE`: 바뀐 행은 현재 버전을 닫고 새 버전 추가) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한·교통약자 표시, `valid_to`, `is_current`, `row_hash`(속성 해시, 바뀐 행 판단), `source_run_key`(이 버전을 만든 full run) |
+| `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 (`MERGE`) | 없음 | 타입·출력·방식·전원 유형·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current`, `row_hash`, `source_run_key` |
 | `core.dim_date` | 날짜 1일 | `date` | 정적. 공휴일이 바뀌면 테이블 전체 덮어쓰기 (작은 정적 테이블이라 `MERGE` 규칙의 예외) | 없음 | 요일, 주말, 공휴일 |
 
 - 팩트는 **추가만** 한다. 고칠 일은 새 행으로 남긴다 (보정 전이). 예외는 세션 종료 갱신 하나
@@ -541,7 +542,7 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
   1. sha 형식과 그 sha의 이미지가 GHCR에 있는지 확인
   2. 러너가 Tailscale 임시 노드(`tag:ci`, OAuth 클라이언트)로 tailnet에 접속. ACL은 `tag:ci → eonje-a:22`만 허용하고, 저장할 때마다 정책 테스트로 확인한다
   3. `deploy` 계정으로 compose 파일 두 개, `init.sh`, 배포 스크립트를 `scp`
-  4. 서버에 복사한 `infra/deploy/node-a.sh <sha>`를 ssh로 실행(표준입력으로 흘려 넣지 않음: `docker compose run`이 남은 스크립트를 먹는다): 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → **실행 중인 태스크 컨테이너 대기**(Airflow가 띄운 eonje 이미지 컨테이너, 최대 5분. 마이그레이션과 Airflow 재시작이 수집 중인 태스크를 끊지 않게) → `migrate`(Alembic, 3단계부터 `ensure-iceberg-tables`도) → 원본 버킷 확인 → `up -d --wait`(헬스체크 대기) → **`spark-check`**(`timeout 300`. worker가 없으면 executor를 기다리며 멈추므로). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지하며 `deploy` 브랜치도 옮기지 않는다. 컨테이너는 이미 새 이미지로 떠 있지만 수집은 Spark와 무관해서 계속 돈다
+  4. 서버에 복사한 `infra/deploy/node-a.sh <sha>`를 ssh로 실행(표준입력으로 흘려 넣지 않음: `docker compose run`이 남은 스크립트를 먹는다): 모든 이미지 pull(collector 포함, `--profile tools`) → Postgres·SeaweedFS 기동 → **실행 중인 태스크 컨테이너 대기**(Airflow가 띄운 eonje 이미지 컨테이너, 최대 5분. 마이그레이션과 Airflow 재시작이 수집 중인 태스크를 끊지 않게) → `migrate`(Alembic) → 원본·웨어하우스 버킷 확인(둘 다 "만들었음" 또는 "이미 있음"이어야 통과) → `up -d --wait`(헬스체크 대기) → **`ensure-iceberg-tables`**(Iceberg 테이블 생성·컬럼 추가. Spark 클러스터가 떠 있어야 하므로 `up` 뒤) → **`spark-check`**(둘 다 `timeout 300`. worker가 없으면 executor를 기다리며 멈추므로). 실패하면 그 자리에서 멈추고 `image.env`는 직전 성공 sha를 유지하며 `deploy` 브랜치도 옮기지 않는다. 컨테이너는 이미 새 이미지로 떠 있지만 수집은 Spark와 무관해서 계속 돈다
   5. 성공하면 `deploy` 브랜치를 `<sha>`로 force 이동 → GitDagBundle이 새 DAG를 가져감 (`refresh_interval` 60초)
 - **DAG 배포는 GitDagBundle**(`compose.node-a.prod.yaml`: `repo_url` 공개 레포, `tracking_ref=deploy`, `subdir=dags`, 연결·토큰 없음). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 배포 성공 후 브랜치를 옮겨 순서를 보장한다. 운영에서도 DAG는 멈춘 상태로 등록되므로, 첫 배포 후 사람이 한 번 켜야 수집이 시작된다
 - 시크릿 (GitHub Actions): `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`(배포 전용 키, 서버 `authorized_keys`에서 `from="100.64.0.0/10"`과 포워딩 금지로 제한), `DEPLOY_KNOWN_HOSTS`(eonje-a 호스트 키, Tailscale 주소 기준)
@@ -611,7 +612,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. 이어서 `storage/lake/iceberg.py`, `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
+| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. 이어서 `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
