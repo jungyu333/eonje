@@ -42,16 +42,19 @@ done
 
 # 버킷이 이미 있으면 weed shell이 0이 아닌 코드로 끝날 수 있다. 판단은 출력으로 하고,
 # set -e가 출력을 보여 주기도 전에 스크립트를 끝내지 않게 || true를 붙인다
-echo "ensure bucket"
-bucket_out=$("${compose[@]}" exec -T seaweedfs sh -c \
-  'echo "s3.bucket.create -name ${EONJE_RAW_BUCKET:-eonje-raw}" | weed shell' 2>&1 < /dev/null) || true
+echo "ensure buckets"
+bucket_out=$("${compose[@]}" exec -T seaweedfs sh -c '
+  for b in "${EONJE_RAW_BUCKET:-eonje-raw}" "${EONJE_WAREHOUSE_BUCKET:-eonje-warehouse}"; do
+    echo "s3.bucket.create -name $b" | weed shell
+  done' 2>&1 < /dev/null) || true
 echo "$bucket_out"
-case "$bucket_out" in
-  *"created bucket"*|*"already exists"*) ;;
-  *) echo "bucket check failed" >&2; exit 1 ;;
-esac
+ok=$(grep -cE "created bucket|already exists" <<< "$bucket_out" || true)
+[[ "$ok" -eq 2 ]] || { echo "bucket check failed" >&2; exit 1; }
 
 "${compose[@]}" up -d --wait --remove-orphans
+
+echo "ensure iceberg tables"
+timeout 300 "${compose[@]}" run --rm -T ensure-iceberg-tables < /dev/null
 
 echo "spark check"
 timeout 300 "${compose[@]}" run --rm -T spark-check < /dev/null
