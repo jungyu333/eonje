@@ -8,6 +8,7 @@ from typing import Any
 from airflow.providers.docker.operators.docker import DockerOperator
 
 SKIPPED = 99  # eonje.cli.exit_codes.SKIPPED (예산 소진, 늦은 run)
+API_POOL = "evcharger_api"
 
 # compose·Airflow 쪽에서만 쓰는 값. 태스크 컨테이너에는 넘기지 않는다
 _NOT_FOR_TASKS = {

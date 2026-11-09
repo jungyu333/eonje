@@ -177,7 +177,13 @@ services:
   airflow-init:
     <<: *airflow
     restart: "no"
-    command: [ "airflow", "db", "migrate" ]
+    # pools set은 있으면 갱신하므로 매번 돌려도 된다. pool이 없으면 그 pool을 쓰는 태스크가 실행되지 않는다
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate
+        airflow pools set evcharger_api 1 "EvCharger API calls (one at a time, shared daily quota)"
 
   airflow-api-server:
     <<: *airflow
