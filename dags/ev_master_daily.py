@@ -17,8 +17,7 @@ TIMEOUT_MIN = 20
 with DAG(
     dag_id="ev_master_daily",
     # KST 03:11 = UTC 18:11. API 한도가 하루 단위로 리셋된 직후라 예산이 넉넉하고
-    # 배포와 겹칠 일이 적다. 03:10 delta가 끝난 직후 시작하므로, 9분 안에 끝나면
-    # 03:20 delta와 pool에서 겹치지 않는다
+    # 배포와 겹칠 일이 적다 (KST 03:05~03:35에는 배포하지 않는다, node-a.sh)
     schedule="11 18 * * *",
     start_date=datetime(2026, 11, 1, tzinfo=UTC),
     catchup=False,  # API는 '지금 전체'만 준다. 지난 날짜는 받을 수 없다

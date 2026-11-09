@@ -4,7 +4,7 @@ import os
 from datetime import UTC, datetime, timedelta
 
 from airflow.sdk import DAG
-from eonje_airflow.operators import API_POOL, SKIPPED, EonjeTask
+from eonje_airflow.operators import SKIPPED, EonjeTask
 
 # 개발 PC는 make build로 만든 eonje-collector:dev, 운영은 ghcr.io/jungyu333/eonje-collector:<sha>
 IMAGE_REPO = os.environ.get("EONJE_IMAGE_REPO", "eonje")
@@ -44,8 +44,7 @@ with DAG(
         retries=2,
         retry_delay=timedelta(minutes=1),
         do_xcom_push=False,
-        pool=API_POOL,
-        # 마스터와 같은 pool에서 함께 대기하면 delta가 먼저 슬롯을 받는다
-        # (지연 허용치가 10분이라 시간에 민감)
-        priority_weight=10,
+        # pool evcharger_api에 넣지 않는다. API가 호출 시각 기준 최근 N분만 주므로
+        # 늦게 부른 만큼 앞쪽 변경분을 잃는다. 마스터와 동시에 돌아도 delta 1회는
+        # 최대 3페이지 × 3회라 예산 상한 여유가 흡수한다
     )
