@@ -40,7 +40,8 @@ docs/         # design.md, requirements.md
 - **Airflow is known only in `dags/` and `docker/airflow/eonje_airflow/`.** `eonje/` and `api/` never import `airflow`.
   DAG files import only `airflow`, stdlib, and `eonje_airflow` (shared DAG code such as `EonjeTask`, baked into the
   Airflow image so imports resolve the same with the dev folder mount and the prod GitDagBundle). They read env vars
-  directly and never import `eonje`.
+  directly and never import `eonje`. `eonje_airflow` only grows: never remove or rename a name in it, because a rollback
+  starts the old Airflow image while GitDagBundle still serves the new DAGs.
 - **External I/O lives only in `client/` and `storage/`.** `transform/` is pure: no HTTP, no DB, no filesystem.
   SparkSession creation, s3a reads, and JDBC writes belong in `storage/`.
 - **API vocabulary (`statId`, `chgerId`, `stat`, ...) is translated once in `transform/observations.py`** into internal
