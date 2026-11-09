@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import httpx
 
-from eonje.cli import exit_codes
 from eonje.cli.context import JobContext
-from eonje.collect.delta import DeltaResult, Outcome, collect_delta
+from eonje.cli.jobs._collect import exit_code
+from eonje.collect.delta import collect_delta
 from eonje.storage.postgres.db import make_engine, make_session_factory
 from eonje.storage.raw.fs import raw_filesystem
 
@@ -29,12 +29,3 @@ def run(ctx: JobContext) -> int:
     finally:
         engine.dispose()
     return exit_code(result)
-
-
-def exit_code(result: DeltaResult) -> int:
-    """이미 완료된 run은 성공(이후 태스크 진행), 받지 않은 run은 skipped."""
-    match result.outcome:
-        case Outcome.COLLECTED | Outcome.ALREADY_COMPLETE:
-            return exit_codes.OK
-        case Outcome.SKIPPED_STALE | Outcome.SKIPPED_BUDGET:
-            return exit_codes.SKIPPED
