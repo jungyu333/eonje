@@ -18,7 +18,7 @@ def run(ctx: JobContext) -> int:
         spark.stop()
 
     for name in result.created:
-        log.info("created:  %s", name)
+        log.info("created: %s", name)
 
     for name, columns in result.altered.items():
         log.info("added columns: %s %s", name, list(columns))
