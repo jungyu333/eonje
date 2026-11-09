@@ -132,6 +132,27 @@ services:
       postgres:
         condition: service_healthy
 
+  ensure-iceberg-tables:
+    image: ${EONJE_IMAGE_REPO:-eonje}-spark:${EONJE_IMAGE_TAG:-dev}
+    profiles: [ "tools" ]
+    env_file: ../.env
+    environment:
+      EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD:?set EONJE_DB_PASSWORD in .env}@postgres:5432/eonje
+      EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_SPARK_MASTER: spark://spark-master:7077
+    entrypoint: [ "sh", "-c" ]
+    command:
+      - exec python -m eonje.cli ensure-iceberg-tables --run-id ensure-iceberg-tables --run-after "$$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+
   # Spark 경로 확인 (spark-check 잡): executor 계산 + Iceberg 카탈로그. 쓰기 없음
   # CLI가 run 인자를 요구하므로 run_after는 실행 시각으로 넘긴다 (잡은 쓰지 않음)
   spark-check:
