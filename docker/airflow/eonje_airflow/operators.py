@@ -8,6 +8,10 @@ from typing import Any
 from airflow.providers.docker.operators.docker import DockerOperator
 
 SKIPPED = 99  # eonje.cli.exit_codes.SKIPPED (예산 소진, 늦은 run)
+# 지연에 둔감한 API 태스크(마스터 등)가 함께 쓰는 pool. 슬롯 1이라 한 번에 하나만 돈다.
+# 상태 변경분(fetch_delta)은 넣지 않는다: 늦게 부른 만큼 최근 N분 창이 밀려 데이터를 잃는다.
+# airflow-init이 만든다.
+# 이 모듈은 이름을 지우거나 바꾸지 않고 추가만 한다 (옛 sha로 롤백할 때 DAG가 깨지지 않게)
 API_POOL = "evcharger_api"
 
 # compose·Airflow 쪽에서만 쓰는 값. 태스크 컨테이너에는 넘기지 않는다
