@@ -71,7 +71,7 @@ DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색�
 
 ### 2.3 실행 모델 — 태스크는 런타임별 컨테이너에서
 
-- **Airflow는 지휘만 한다.** 공식 이미지(DAG bundle용 git provider가 없으면 그것만 얹은 얇은 이미지). Airflow 이미지에 Spark·pandas·eonje 패키지를 넣지 않는다. DAG 파일은 `airflow`와 표준 라이브러리만 import
+- **Airflow는 지휘만 한다.** 공식 이미지(DAG bundle용 git provider가 없으면 그것만 얹은 얇은 이미지). Airflow 이미지에 Spark·pandas·eonje 패키지를 넣지 않는다. DAG 파일은 `airflow`, 표준 라이브러리, `eonje_airflow`만 import. `eonje_airflow`(`docker/airflow/eonje_airflow/`)는 여러 DAG가 쓰는 공용 코드(`EonjeTask` 등)로, Airflow 이미지에 넣는다. DAG 폴더 안 공용 모듈은 개발 PC(폴더 마운트)와 운영(GitDagBundle)의 `sys.path` 기준이 달라 import가 어긋날 수 있어서다 (2026.11.09)
 - **태스크 이미지는 런타임별로 나눈다.** Dockerfile은 `docker/` 아래 폴더 하나에 이미지 하나, 이미지 이름 = 폴더 이름
 
   | 이미지 | Dockerfile | 내용 | 쓰는 곳 |
