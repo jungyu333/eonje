@@ -26,7 +26,8 @@ compose=(docker compose
 
 # Airflow가 띄운 태스크 컨테이너(compose 프로젝트 라벨이 없는 eonje 이미지)가 돌고 있으면 끝날 때까지 기다린다.
 # 마이그레이션과 Airflow 재시작이 수집 중인 태스크를 끊지 않게 한다.
-# 수집 태스크의 execution_timeout(기본 5분)만큼 기다리고, 그래도 남아 있으면 그냥 배포한다.
+# 상태 변경분 수집의 execution_timeout(기본 5분)만큼 기다리고, 그래도 남아 있으면 그냥 배포한다.
+# 마스터 수집(KST 03:11, 최대 20분)은 다 기다리지 못하므로 KST 03:05~03:35에는 배포하지 않는다.
 running_tasks() {
   docker ps --format '{{.Image}} {{.Label "com.docker.compose.project"}}' \
     | awk '$2 == "" && $1 ~ /eonje-/' | wc -l

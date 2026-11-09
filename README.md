@@ -101,7 +101,8 @@ make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번�
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
 - Spark master UI: http://127.0.0.1:8090 (Workers 1, Cores 2, Memory 4.0 GiB면 정상)
-- `ev_status_10min`은 **멈춘 상태(paused)로 등록**되고, 개발 PC에서는 켜지 않는다. 켜면 10분마다 수집한다
+- 수집 DAG(`ev_status_10min`, `ev_master_daily`)는 **멈춘 상태(paused)로 등록**되고, 개발 PC에서는 켜지 않는다. 켜면 10분마다·매일 KST 03:11에 수집한다
+- 운영에서 새 DAG도 멈춘 상태로 등록되므로, 첫 배포 후 Airflow UI에서 한 번 켠다 (`ev_master_daily`는 이번에 추가)
 - 한 번 실행해 보려면 `airflow dags test`를 쓴다. 스케줄러를 거치지 않고 그 자리에서 끝까지 돌려서, DAG가 멈춰 있어도 된다
 
   ```bash

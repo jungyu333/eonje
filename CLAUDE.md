@@ -37,8 +37,11 @@ docs/         # design.md, requirements.md
 
 ## Boundary Rules
 
-- **Airflow is known only in `dags/`.** `eonje/` and `api/` never import `airflow`. DAG files import only `airflow` and
-  stdlib; they read env vars directly (they cannot import `eonje`).
+- **Airflow is known only in `dags/` and `docker/airflow/eonje_airflow/`.** `eonje/` and `api/` never import `airflow`.
+  DAG files import only `airflow`, stdlib, and `eonje_airflow` (shared DAG code such as `EonjeTask`, baked into the
+  Airflow image so imports resolve the same with the dev folder mount and the prod GitDagBundle). They read env vars
+  directly and never import `eonje`. `eonje_airflow` only grows: never remove or rename a name in it, because a rollback
+  starts the old Airflow image while GitDagBundle still serves the new DAGs.
 - **External I/O lives only in `client/` and `storage/`.** `transform/` is pure: no HTTP, no DB, no filesystem.
   SparkSession creation, s3a reads, and JDBC writes belong in `storage/`.
 - **API vocabulary (`statId`, `chgerId`, `stat`, ...) is translated once in `transform/observations.py`** into internal
@@ -136,7 +139,9 @@ make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
 
 ## Output Language
 - Write reports, questions, review findings, and summaries addressed to the user in **Korean**.
-- Keep code, identifiers, code comments, test names, commit messages, and PR titles/bodies in English.
+- Keep code, identifiers, test names, commit messages, and PR titles/bodies in English.
+- Code comments and docstrings are written in **Korean** (the existing code is; this rule follows it). Test comments
+  (GIVEN/WHEN/THEN) stay in English.
 - When editing an existing file, keep the file's own language (`docs/` is written in Korean).
 
 ## Git & PR Conventions

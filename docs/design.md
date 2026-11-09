@@ -71,7 +71,7 @@ DuckDB·PyIceberg는 원본과 Iceberg 테이블을 복사 없이 읽는 탐색�
 
 ### 2.3 실행 모델 — 태스크는 런타임별 컨테이너에서
 
-- **Airflow는 지휘만 한다.** 공식 이미지(DAG bundle용 git provider가 없으면 그것만 얹은 얇은 이미지). Airflow 이미지에 Spark·pandas·eonje 패키지를 넣지 않는다. DAG 파일은 `airflow`와 표준 라이브러리만 import
+- **Airflow는 지휘만 한다.** 공식 이미지(DAG bundle용 git provider가 없으면 그것만 얹은 얇은 이미지). Airflow 이미지에 Spark·pandas·eonje 패키지를 넣지 않는다. DAG 파일은 `airflow`, 표준 라이브러리, `eonje_airflow`만 import. `eonje_airflow`(`docker/airflow/eonje_airflow/`)는 여러 DAG가 쓰는 공용 코드(`EonjeTask` 등)로, Airflow 이미지에 넣는다. DAG 폴더 안 공용 모듈은 개발 PC(폴더 마운트)와 운영(GitDagBundle)의 `sys.path` 기준이 달라 import가 어긋날 수 있어서다 (2026.11.09)
 - **태스크 이미지는 런타임별로 나눈다.** Dockerfile은 `docker/` 아래 폴더 하나에 이미지 하나, 이미지 이름 = 폴더 이름
 
   | 이미지 | Dockerfile | 내용 | 쓰는 곳 |
@@ -318,7 +318,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 | 수집 | 주기 | 호출/일 | 내용 |
 |---|---|---|---|
-| 마스터 전체 | 1일 1회 | 53 | `getChargerInfo` 전 페이지. 차원 갱신 + 그날의 전체 상태 기준점 |
+| 마스터 전체 | 1일 1회 (KST 03:11) | 53 | `getChargerInfo` 전 페이지 (2026.11.09 실측 528,892건 = 53페이지, 컨테이너 안에서 페이지당 약 1~8초). 차원 갱신 + 그날의 전체 상태 기준점 |
 | 상태 변경분 | 10분 | 144 × 2~3 = 288~432 | `getChargerStatus period=10 numOfRows=9999` 전 페이지 |
 | 여유 | | ~500 | 재시도, 수동 조회, (3단계) 알림용 집중 폴링 |
 
@@ -329,8 +329,8 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - "오늘"은 KST 자정 기준 하루 `[00:00, 다음 날 00:00)`
   - 상한 = `floor(EONJE_API_DAILY_LIMIT × EONJE_BUDGET_SAFETY_RATIO) − EONJE_BUDGET_RESERVE_CALLS`. 기본 1000 × 0.95 − 0 = 950 (NFR-01: 한도 95% 전에 멈춤)
   - 남은 호출 = 상한 − 오늘 사용량. 페이지마다 최대 `api_max_attempts`번 시도하므로 **페이지 상한 = 남은 호출 // api_max_attempts**. 재시도가 몰려도 한도를 넘을 수 없다. 1페이지도 안 되면 그 run은 호출 없이 건너뛴다
-  - 첫 버전(2단계)의 단순화: 남은 호출을 지금 run에 모두 허용한다. 평소 사용량(하루 약 485회)이 상한보다 한참 낮아서다. **잔여 실행 횟수에 맞춘 배분은 5단계**, **마스터 DAG 몫 예약(`EONJE_BUDGET_RESERVE_CALLS`를 마스터 1회분 = 53 × api_max_attempts 이상으로)은 마스터 수집이 생기는 3단계**에서
-  - 동시 실행 경쟁: 판단(`count_calls` → `decide`)과 호출 사이에 다른 수집 잡이 호출하면 두 잡이 같은 사용량을 보고 각자 상한만큼 쓸 수 있다. 지금은 수집 잡이 `fetch_delta` 하나이고 안전 비율·예약분이 흡수한다. **`fetch_master`가 생기는 3단계에서 수집 잡을 직렬화한다**: Airflow pool `evcharger_api`(슬롯 1)에 두 수집 태스크를 넣는 것이 기본안. 수동 CLI 실행까지 막아야 하면 수집 동안 Postgres advisory lock(`pg_advisory_lock`)을 잡는다
+  - 첫 버전(2단계)의 단순화: 남은 호출을 지금 run에 모두 허용한다. 평소 사용량(하루 약 485회)이 상한보다 한참 낮아서다. **잔여 실행 횟수에 맞춘 배분은 5단계**, 마스터 DAG 몫 예약(`EONJE_BUDGET_RESERVE_CALLS`를 마스터 1회분 = 53 × api_max_attempts 이상으로)은 **3단계에서 하지 않기로 했다** (2026.11.09): 마스터가 한도가 리셋된 직후(KST 03:11)에 돌아 그때까지 쓴 호출이 수십 회뿐이라, 최악의 경우(159회)도 상한 안에 든다. 운영에서 잘린 마스터 run이 보이면 다시 검토한다
+  - 동시 실행 경쟁: 판단(`count_calls` → `decide`)과 호출 사이에 다른 수집 잡이 호출하면 두 잡이 같은 사용량을 보고 각자 상한만큼 쓸 수 있다. **상태 변경분(`fetch_delta`)은 직렬화하지 않는다** (2026.11.09 리뷰로 결정): API가 호출 시각 기준 최근 N분만 주므로, 다른 수집을 기다리느라 늦게 부르면 지연 허용치 안이라도 앞쪽 변경분을 잃는다. 예산 경쟁은 delta 1회가 최대 3페이지 × 3회 = 9회라 상한 여유가 흡수한다. 지연에 둔감한 API 태스크(마스터, 앞으로의 코드 갱신 등)만 Airflow pool `evcharger_api`(슬롯 1, `airflow-init`이 `airflow pools set`으로 만든다)에 넣어 서로 겹치지 않게 한다. pool은 Airflow 태스크에만 걸리므로 수동 CLI 실행(`make run`)은 막지 못한다. 그것까지 막아야 하면 수집 동안 Postgres advisory lock(`pg_advisory_lock`)을 잡는다
 - 페이지 사이 상태 변화: 한 수집 안에서 페이지가 다른 시각에 조회되므로, 관측 시각은 페이지 응답 시각이 아니라 **수집 시작 시각(버킷)**으로 통일. 원본에는 페이지 응답 시각도 남김.
 - 페이징 드리프트 (2026.10.29 첫 실수집에서 확인): 페이지를 받는 사이에 최근 N분 창이 움직여 `totalCount`가 바뀐다. 실측 1페이지 13,297 → 0.9초 뒤 2페이지 13,290, 받은 행 13,290 (모두 고유, 중복 없음). 응답이 `statUpdDt` 순으로 정렬돼 있지 않아서, 행이 빠지면 페이지 경계의 행이 어느 페이지에도 안 들어갈 수 있다 (누락).
   - manifest에 `page_size`, `expected_pages`를 남긴다. 받은 페이지 < `expected_pages`면 **예산 잘림**, 다 받았는데 `row_count ≠ total_count`면 **드리프트** (`drift = total_count − row_count`, 양수는 누락, 음수는 중복 가능성)로 구분해 경고한다
@@ -366,7 +366,8 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - manifest: `version, dataset, operation, dt, run_key, collected_at(UTC), total_count(1페이지 값), row_count, page_size, expected_pages, pages`. 완료 시각처럼 재실행마다 바뀌는 값은 넣지 않는다. 받은 페이지 < `expected_pages`면 예산 상한으로 잘린 run, 페이지를 다 받았는데 `row_count ≠ total_count`면 페이징 드리프트 (5장)
 - **완료된 run은 다시 받지 않는다** (2026.10.29). API는 '지금부터 최근 N분'만 주므로, 같은 run을 나중에 받으면 다른 데이터에 예전 `collected_at`이 붙고 `start`가 원래 원본을 지운다. 원본은 다시 받을 수 없다
   - manifest가 있으면 호출 없이 성공 (종료 코드 0)
-  - `run_after`가 지금과 `EONJE_FETCH_MAX_LAG_MIN`(기본 = `EONJE_STATUS_PERIOD_MIN`, 그보다 클 수 없음)보다 멀면 호출 없이 건너뜀 (99). 밀린 run, catchup
+  - `run_after`가 지금과 지연 허용치보다 멀면 호출 없이 건너뜀 (99). 밀린 run, catchup. 허용치는 데이터셋마다 다르다: 상태 변경분은 `EONJE_FETCH_MAX_LAG_MIN`(기본 = `EONJE_STATUS_PERIOD_MIN`, 그보다 클 수 없음. API 창이 최근 N분이라), 마스터는 `EONJE_MASTER_MAX_LAG_MIN`(기본 60. 응답이 '지금 전체'라 창 제약은 없지만 늦게 받은 run에 예전 시각이 붙지 않게)
+  - 이 규칙은 `collect/run.py`의 공통 흐름 하나에 있고, 데이터셋별 차이(API, 데이터셋, 파라미터, 지연 허용치)만 `RunSpec`으로 넘긴다 (`collect/delta.py`, `collect/master.py`)
   - manifest가 없는 run(중간 실패)만 run 폴더를 비우고 다시 받는다. 다시 수집하고 싶으면 새 run_id
 - 원본은 run 단위로 덮어쓸 수 있지만, 한 번 완료된 run의 내용은 같은 입력이면 같다 (멱등)
 
@@ -422,8 +423,10 @@ Airflow 3, LocalExecutor, `DockerOperator`. 각 태스크 = 컨테이너 1개 = 
 Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나만 돈다. 변환은 **워터마크** 방식이다: 자기 run의 원본만이 아니라 아직 처리하지 않은 원본 run을 전부 처리한다. 그래서 변환이 멈췄다 살아나면 자동으로 따라잡고, 수집은 변환 상태와 무관하게 계속된다.
 
 ### `ev_master_daily` (1일 1회)
-1. `fetch_pages` (C) — 53페이지 순회, 원본 저장. 페이지 단위 재시도. 호출 로그 기록
-2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다. 변환 흐름과 달리 지연 여유를 두지 않고 방금 받은 run을 바로 처리한다. 그 결과 워터마크보다 늦게 완료된 옛 full run은 디멘션에 반영하지 않고 버린다 (다음 날 full run이 같은 정보를 다시 준다)
+KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉넉하고 배포와 겹칠 일이 적다. 이 DAG가 도는 KST 03:05~03:35에는 배포하지 않는다: 배포 스크립트는 실행 중인 태스크를 5분까지만 기다려서, 마스터(최대 20분)가 중간에 끊기면 호출을 버리고 재시도한다.
+
+1. `fetch_master` (C, pool `evcharger_api`. 상태 변경분은 이 pool에 넣지 않으므로 마스터가 도는 동안에도 delta는 제때 돈다) — 53페이지 순회, 원본 `charger_info` 저장. 페이지 단위 재시도, 호출 로그 기록. `execution_timeout` 20분(약 7분 소요), 재시도 2회 5분 간격(지연 허용치 60분 안에 든다). **0건이거나 예산으로 잘린 run(`truncated`)도 원본과 manifest는 그대로 남긴다** (API가 실제로 준 것을 남기는 원칙). 차원에 반영할지는 `load_dims`가 정한다 (2026.11.09)
+2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다. **반영하지 않는 full run**: 0건, 예산으로 잘린 run(`truncated`), 직전 반영 run보다 행 수가 크게 줄어든 run(기준은 `load_dims` 작업 때 정한다). 이런 run을 반영하면 받지 못한 충전소가 철거된 것처럼 현재 버전이 닫힌다. 건너뛴 run도 워터마크는 넘어가고 경고를 남긴다. 변환 흐름과 달리 지연 여유를 두지 않고 방금 받은 run을 바로 처리한다. 그 결과 워터마크보다 늦게 완료된 옛 full run은 디멘션에 반영하지 않고 버린다 (다음 날 full run이 같은 정보를 다시 준다)
 3. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 전체 상태의 관측 적재와 보정(`charger_state`와 비교해 `source=reconciled` 전이)은 이 DAG에서 하지 않는다. full run도 원본 run이므로 변환 흐름(`ev_transform_10min`)이 delta run과 함께 **수집 시각 순서대로** 처리한다. 따로 돌리면 변환이 밀려 있을 때 시각 T의 전체 스냅샷이 T보다 오래된 `charger_state`와 비교되고, 그 뒤 처리되는 과거 delta가 더 새 상태와 비교돼 가짜·역방향 전이가 생긴다.
@@ -547,6 +550,9 @@ Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나�
 - **DAG 배포는 GitDagBundle**(`compose.node-a.prod.yaml`: `repo_url` 공개 레포, `tracking_ref=deploy`, `subdir=dags`, 연결·토큰 없음). `main`을 추적하지 않는 이유: 머지 직후 이미지가 아직 없을 때 새 DAG가 새 job을 부르면 실패한다. CD가 배포 성공 후 브랜치를 옮겨 순서를 보장한다. 운영에서도 DAG는 멈춘 상태로 등록되므로, 첫 배포 후 사람이 한 번 켜야 수집이 시작된다
 - 시크릿 (GitHub Actions): `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `DEPLOY_SSH_KEY`(배포 전용 키, 서버 `authorized_keys`에서 `from="100.64.0.0/10"`과 포워딩 금지로 제한), `DEPLOY_KNOWN_HOSTS`(eonje-a 호스트 키, Tailscale 주소 기준)
 - 롤백: Actions 탭에서 deploy 워크플로를 sha(`~/eonje/image.env.prev`의 값)로 수동 실행. 이미지와 DAG가 함께 되돌아간다. 마이그레이션은 되돌리지 않으므로, 스키마를 바꾸는 변경은 이전 코드와도 호환되게 만든다
+  - 롤백은 순서가 정방향과 반대가 된다: 옛 Airflow 이미지가 먼저 뜨고 `deploy` 브랜치는 배포가 끝난 뒤에 옮겨지므로, 그사이 새 DAG가 옛 이미지에서 import된다. 그래서 `eonje_airflow`는 추가만 한다(이름을 지우거나 바꾸지 않는다)
+  - **`eonje_airflow`가 없던 sha(`feat/fetch-master` 머지 이전)로 되돌릴 때는 `deploy` 브랜치를 먼저 그 sha로 옮긴 뒤**(`git push --force origin <sha>:refs/heads/deploy`) deploy 워크플로를 실행한다. 옛 DAG는 새 이미지에서도 돈다
+- 배포 시간대: KST 03:05~03:35(`ev_master_daily`)에는 머지·배포하지 않는다 (7장)
 - 배포는 한 번에 하나씩 순서대로 돈다 (`concurrency: deploy-node-a`, 취소 없음)
 - self-hosted runner는 쓰지 않는다 (public 레포)
 
@@ -580,7 +586,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 ### 8.7 용량과 설정
 
 - 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
-- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
+- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(상태 변경분 수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게. 마스터 수집은 DAG 상수 20분), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
 ## 9. 서빙 (초안)
@@ -612,7 +618,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. 이어서 `ev_master_daily` + `core.dim_*`(SCD2)·`dim_date`, 수집 잡 직렬화(pool) | fetch Python, load Spark | A |
+| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. ~~`fetch-master` + `ev_master_daily`(수집), 수집 잡 직렬화(pool `evcharger_api`)~~ **완료(2026.11.09)**. 이어서 `load_dims`(`core.dim_*` SCD2, `ops.transform_watermark`)·`dim_date` | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |

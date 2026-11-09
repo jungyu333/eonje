@@ -215,6 +215,42 @@ def test_fetch_max_lag_beyond_the_status_period_is_rejected(
         Settings()  # type: ignore[call-arg]
 
 
+def test_master_max_lag_defaults_to_sixty_minutes(api_key_env: str) -> None:
+    # GIVEN only the required key is set
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the master collection lag allowance is 60 minutes
+    assert settings.master_max_lag_min == 60
+    assert settings.master_max_lag == timedelta(minutes=60)
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_non_positive_master_max_lag_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a master lag allowance that would reject every run, or is meaningless
+    monkeypatch.setenv("EONJE_MASTER_MAX_LAG_MIN", value)
+
+    # WHEN / THEN loading fails on the master lag field
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "master_max_lag_min" in str(exc.value)
+
+
+def test_master_max_lag_of_one_minute_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GIVEN the smallest allowed master lag
+    monkeypatch.setenv("EONJE_MASTER_MAX_LAG_MIN", "1")
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN the timedelta follows the configured minutes
+    assert settings.master_max_lag == timedelta(minutes=1)
+
+
 def test_status_interval_of_zero_is_rejected(
     api_key_env: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

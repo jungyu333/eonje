@@ -71,8 +71,8 @@ buckets:         ## 원본·웨어하우스 버킷 생성 (이미 있으면 성�
 migrate-image:   ## 이미지 안의 마이그레이션 적용 (CD와 같은 경로). make build 먼저
 	$(COMPOSE) run --rm migrate
 
-airflow-recreate: ## .env 변경(비밀번호 등)을 Airflow api-server에 반영
-	$(COMPOSE) up -d --force-recreate airflow-api-server
+airflow-recreate: ## Airflow 서비스를 다시 만든다 (.env 변경, make build 후 새 이미지 반영)
+	$(COMPOSE) up -d --force-recreate airflow-api-server airflow-scheduler airflow-dag-processor
 
 dags-check:      ## Airflow 컨테이너에서 DAG import 오류 확인 (make up 필요)
 	$(COMPOSE) exec airflow-dag-processor airflow dags list-import-errors

@@ -33,6 +33,7 @@ class Settings(DatabaseSettings):
     # run_after와 지금의 차이 허용치. 비우면 status_period_min과 같다.
     # API 창(최근 status_period_min분)보다 클 수 없다. 크면 창이 덮지 못하는 run까지 받는다
     fetch_max_lag_min: int | None = Field(default=None, ge=1)
+    master_max_lag_min: int = Field(default=60, ge=1)
     serve_zcodes: list[str] = Field(default_factory=list)
 
     # 저장
@@ -51,6 +52,10 @@ class Settings(DatabaseSettings):
     @property
     def fetch_max_lag(self) -> timedelta:
         return timedelta(minutes=self.fetch_max_lag_min or self.status_period_min)
+
+    @property
+    def master_max_lag(self) -> timedelta:
+        return timedelta(minutes=self.master_max_lag_min)
 
     @model_validator(mode="after")
     def _lag_within_api_window(self) -> Settings:
