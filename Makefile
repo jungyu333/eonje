@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check
+.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -93,3 +93,6 @@ dag-pause:       ## DAG 끄기 (실수로 켰을 때). 예: make dag-pause DAG=e
 
 spark-check:     ## Spark 경로 확인: executor 계산 + Iceberg 카탈로그 (make build 후)
 	$(COMPOSE) run --rm -T spark-check < /dev/null
+
+ensure-iceberg-tables:  ## Iceberg 테이블 생성·컬럼 추가 (make build, make buckets 후)
+	$(COMPOSE) run --rm -T ensure-iceberg-tables < /dev/null
