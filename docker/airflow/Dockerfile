@@ -8,3 +8,6 @@ RUN pip install --no-cache-dir \
       apache-airflow-providers-docker \
       apache-airflow-providers-git \
       --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-3.11.txt"
+
+COPY eonje_airflow /opt/eonje_airflow/eonje_airflow
+ENV PYTHONPATH="/opt/eonje_airflow${PYTHONPATH:+:$PYTHONPATH}"

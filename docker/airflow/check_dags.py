@@ -15,13 +15,13 @@ from airflow.sdk import DAG
 
 
 def _check_private_environment_attribute() -> list[str]:
-    # dags/의 EonjeTask는 실행 시점에 _private_environment를 덮어써 비밀값을 넘긴다.
+    # eonje_airflow의 EonjeTask는 실행 시점에 _private_environment를 덮어써 비밀값을 넘긴다.
     # 공개 API가 아니므로, provider가 이 이름을 쓰지 않게 되면 여기서 실패시킨다
     probe = DockerOperator(task_id="probe", image="probe", private_environment={"K": "v"})
     if getattr(probe, "_private_environment", None) != {"K": "v"}:
         return [
             "DockerOperator no longer keeps private_environment in _private_environment; "
-            "update EonjeTask in dags/"
+            "update EonjeTask in docker/airflow/eonje_airflow/operators.py"
         ]
     return []
 
