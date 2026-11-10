@@ -25,7 +25,7 @@ def upgrade() -> None:
         "transform_watermark",
         sa.Column("task", sa.String(length=64), nullable=False),
         sa.Column("collected_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("run_key", sa.String(length=250), nullable=False),
+        sa.Column("run_key", sa.String(length=250, collation="C"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("task", name=op.f("pk_transform_watermark")),
     )

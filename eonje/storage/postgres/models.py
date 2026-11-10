@@ -47,5 +47,5 @@ class TransformWatermark(Base):
 
     task: Mapped[str] = mapped_column(String(64), primary_key=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    run_key: Mapped[str] = mapped_column(String(250))
+    run_key: Mapped[str] = mapped_column(String(250, collation="C"))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
