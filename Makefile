@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check
+.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check test-spark
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -96,3 +96,13 @@ spark-check:     ## Spark 경로 확인: executor 계산 + Iceberg 카탈로그 
 
 ensure-iceberg-tables:  ## Iceberg 테이블 생성·컬럼 추가 (make build, make buckets 후)
 	$(COMPOSE) run --rm -T ensure-iceberg-tables < /dev/null
+
+# 레포를 마운트해 이미지 안의 Java·pyspark로 돌린다 (Windows에 Java가 필요 없다).
+# pytest는 이미지에 없어서 볼륨(eonje-pytest)에 한 번만 설치해 둔다.
+# --python: 마운트한 레포의 .venv(Windows용)를 uv가 집지 않게 이미지의 파이썬을 지정한다
+test-spark:      ## Spark 테스트 (make build 먼저). 예: make test-spark ARGS="-k dims"
+	MSYS_NO_PATHCONV=1 docker run --rm --user root -e PYTHONDONTWRITEBYTECODE=1 \
+		-v "$(CURDIR):/work" -w /work -v eonje-pytest:/opt/pytest \
+		--entrypoint sh eonje-spark:$(TAG) -c \
+		'[ -d /opt/pytest/pytest ] || uv pip install -q --python /app/.venv/bin/python --target /opt/pytest "pytest>=8"; \
+		 PYTHONPATH=/opt/pytest python -m pytest -p no:cacheprovider -m spark tests/spark $(ARGS)'
