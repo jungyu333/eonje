@@ -63,6 +63,8 @@ jobs:
               - pyproject.toml
               - uv.lock
               - docker/tasks/spark/**
+              - tests/spark/**
+              - Makefile
             db:
               - *ci
               - eonje/**
@@ -181,6 +183,10 @@ jobs:
             org.apache.spark.deploy.master.Master --help 2>&1 || true)
           echo "$out"
           grep -q "Usage: Master" <<< "$out"
+      # transform/ tests need a JVM, so they run inside this image
+      # (the default `make test` run excludes them).
+      - name: spark tests
+        run: make test-spark TAG=ci
 
   db:
     runs-on: ubuntu-latest
