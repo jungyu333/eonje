@@ -251,6 +251,42 @@ def test_master_max_lag_of_one_minute_is_accepted(
     assert settings.master_max_lag == timedelta(minutes=1)
 
 
+def test_master_min_row_ratio_defaults_to_ninety_percent(api_key_env: str) -> None:
+    # GIVEN only the required key is set
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN a master run must carry at least 90% of the current chargers to be loaded
+    assert settings.master_min_row_ratio == 0.9
+
+
+@pytest.mark.parametrize("value", ["0", "-0.1", "1.01", "2"])
+def test_master_min_row_ratio_outside_bounds_is_rejected(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a ratio that disables the drop check or demands more rows than the dimension has
+    monkeypatch.setenv("EONJE_MASTER_MIN_ROW_RATIO", value)
+
+    # WHEN / THEN loading fails on the ratio field
+    with pytest.raises(ValidationError) as exc:
+        Settings()  # type: ignore[call-arg]
+    assert "master_min_row_ratio" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["0.01", "0.9", "1", "1.0"])
+def test_master_min_row_ratio_within_bounds_is_accepted(
+    api_key_env: str, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # GIVEN a ratio in (0, 1], including the inclusive upper edge
+    monkeypatch.setenv("EONJE_MASTER_MIN_ROW_RATIO", value)
+
+    # WHEN settings are loaded
+    settings = Settings()  # type: ignore[call-arg]
+
+    # THEN it is accepted as a float
+    assert settings.master_min_row_ratio == float(value)
+
+
 def test_status_interval_of_zero_is_rejected(
     api_key_env: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
