@@ -6,10 +6,15 @@ API 필드 이름을 내부 이름으로 바꾸는 곳은 여기 하나다. 빈 
 
 from __future__ import annotations
 
+from datetime import datetime
+from functools import reduce
+
 from pyspark.sql import Column, DataFrame, Window
 from pyspark.sql import functions as F
 
 Field = tuple[str, str, str]  # (내부 이름, API 필드, Spark 타입)
+
+_OPEN_END = "9999-12-31 00:00:00"
 
 STATION_KEY = ("stat_id",)
 STATION_FIELDS: tuple[Field, ...] = (
@@ -100,3 +105,46 @@ def _dimension(
     )
     picked = hashed.withColumn("_rn", F.row_number().over(order)).where(F.col("_rn") == 1)
     return picked.select(*[name for name, _, _ in fields], "row_hash")
+
+
+def scd2_changes(
+    current: DataFrame,
+    incoming: DataFrame,
+    key: tuple[str, ...],
+    *,
+    collected_at: datetime,
+    run_key: str,
+) -> DataFrame:
+    """현재 차원(current)과 새 스냅샷(incoming)을 비교해 차원 테이블에 MERGE할 행을 만든다.
+
+    - 닫을 행: 현재 버전인데 새 스냅샷에 없거나 row_hash가 다른 행 (valid_to, is_current만 바꾼다)
+    - 열 행: 새 스냅샷에 있는데 현재 버전이 없거나 row_hash가 다른 행 (새 버전)
+    결과 컬럼은 current와 같다. 바뀐 게 없으면 0행이라 같은 run을 다시 넣어도 결과가 같다.
+    incoming은 키당 1행이어야 한다 (stations·chargers의 결과).
+    """
+
+    at = F.lit(collected_at).cast("timestamp")
+    cur = current.where(F.col("is_current")).alias("c")
+    new = incoming.alias("n")
+    same_key = reduce(lambda a, b: a & b, [F.col(f"c.{k}") == F.col(f"n.{k}") for k in key])
+    differs = F.col("c.row_hash") != F.col("n.row_hash")
+
+    closed = (
+        cur.join(new, same_key, "left")
+        .where(F.col(f"n.{key[0]}").isNull() | differs)
+        .select(*[F.col(f"c.{name}") for name in current.columns])
+        .withColumn("valid_to", at)
+        .withColumn("is_current", F.lit(False))
+    )
+
+    opened = (
+        new.join(cur, same_key, "left")
+        .where(F.col(f"c.{key[0]}").isNull() | differs)
+        .select(*[F.col(f"n.{name}") for name in incoming.columns])
+        .withColumn("valid_from", at)
+        .withColumn("valid_to", F.lit(_OPEN_END).cast("timestamp"))
+        .withColumn("is_current", F.lit(True))
+        .withColumn("source_run_key", F.lit(run_key))
+    )
+
+    return closed.unionByName(opened.select(*current.columns))

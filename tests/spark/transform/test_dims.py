@@ -1,4 +1,5 @@
-"""Spark tests for eonje.transform.dims: raw getChargerInfo rows -> dim_station / dim_charger rows.
+"""Spark tests for eonje.transform.dims: raw getChargerInfo rows -> dim_station / dim_charger rows,
+and scd2_changes: the dim table plus a new snapshot -> the rows load_dims merges.
 
 Inputs are built from the real getChargerInfo page in tests/fixtures/evcharger, shaped like the
 raw Parquet the collector writes (every API field a string, plus collected_at, page_fetched_at,
@@ -11,17 +12,19 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pyspark.errors import AnalysisException
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType, TimestampType
 
 from eonje.storage.lake.iceberg import DIM_CHARGER, DIM_STATION, IcebergTable
-from eonje.transform.dims import chargers, stations
+from eonje.storage.raw.paths import run_key_from_run_id
+from eonje.transform.dims import chargers, scd2_changes, stations
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "evcharger"
 COLLECTED_AT = datetime(2026, 11, 9, 18, 11, tzinfo=UTC)
@@ -776,3 +779,478 @@ def test_building_twice_from_the_same_raw_gives_the_same_rows(
 
     # THEN the results are identical
     assert first == second
+
+
+# --- scd2_changes: dim table + new snapshot -> rows to MERGE ----------------
+
+KST = timezone(timedelta(hours=9))
+DAY_1, DAY_2, DAY_3 = COLLECTED_AT, NEXT_DAY, NEXT_DAY + timedelta(days=1)
+RUN_1, RUN_2, RUN_3 = (
+    run_key_from_run_id(f"scheduled__{day.isoformat()}") for day in (DAY_1, DAY_2, DAY_3)
+)
+# valid_to of a current version: 9999-12-31 in the session time zone (Asia/Seoul, as in prod)
+OPEN_END = datetime(9999, 12, 31, tzinfo=KST)
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+SCD2_TIMES = ("valid_from", "valid_to")
+
+# Real one-charger stations, so each item is one key in both dimensions.
+A, B, C, D = INFO_ITEMS[0], INFO_ITEMS[1], INFO_ITEMS[2], INFO_ITEMS[5]
+# A with a station and a charger attribute changed, so it is a new version in either dimension.
+A_CHANGED = _like(A, statNm="renamed station", maker="replaced maker")
+A_CHANGED_AGAIN = _like(A, statNm="renamed again", maker="replaced again")
+
+Load = tuple[datetime, str, Sequence[Item]]  # one full run: (collected_at, run_key, items)
+
+
+def _empty_table(spark: SparkSession, dim: Dim) -> DataFrame:
+    """The dim table with its Iceberg columns and no rows, as before the first load."""
+    ddl = ", ".join(f"`{c.name}` {c.type}" for c in dim.table.columns)
+    return spark.createDataFrame([], ddl)
+
+
+def _snapshot(spark: SparkSession, dim: Dim, items: Sequence[Item]) -> DataFrame:
+    return dim.build(_page(spark, *items))
+
+
+def _changes(
+    dim: Dim, current: DataFrame, incoming: DataFrame, at: datetime, run_key: str
+) -> DataFrame:
+    return scd2_changes(current, incoming, dim.key, collected_at=at, run_key=run_key)
+
+
+def _version_id(dim: Dim, row: Any) -> tuple[Any, ...]:
+    return (*(row[k] for k in dim.key), row["valid_from"])
+
+
+def _merged(spark: SparkSession, dim: Dim, table: DataFrame, changes: DataFrame) -> DataFrame:
+    """The table after load_dims' MERGE on (key, valid_from): a change row replaces the version
+    it matches or is inserted. Rebuilt from collected rows, like reading the table back."""
+    rows = {_version_id(dim, r): r for r in table.collect()}
+    source = changes.collect()
+    # MERGE fails when two source rows match one target row
+    assert len({_version_id(dim, r) for r in source}) == len(source), source
+    rows.update({_version_id(dim, r): r for r in source})
+    data = [tuple(r[c] for c in table.columns) for r in rows.values()]
+    return spark.createDataFrame(data, table.schema)
+
+
+def _table(spark: SparkSession, dim: Dim, *loads: Load) -> DataFrame:
+    """The dim table after load_dims applied each full run in order, starting empty."""
+    table = _empty_table(spark, dim)
+    for at, run_key, items in loads:
+        changes = _changes(dim, table, _snapshot(spark, dim, items), at, run_key)
+        table = _merged(spark, dim, table, changes)
+    return table
+
+
+def _order(row: Row) -> tuple[Any, ...]:
+    return (row["stat_id"], row.get("charger_id") or "", row["valid_from"], row["is_current"])
+
+
+def _versions(df: DataFrame) -> list[Row]:
+    """Collected rows with valid_from / valid_to as UTC datetimes (collect() alone gives naive
+    local time), sorted by key, then valid_from, closed before current."""
+    as_micros = df.select(
+        *[F.unix_micros(c).alias(c) if c in SCD2_TIMES else F.col(c) for c in df.columns]
+    )
+    rows = []
+    for collected in as_micros.collect():
+        row = collected.asDict()
+        row.update({c: EPOCH + timedelta(microseconds=row[c]) for c in SCD2_TIMES})
+        rows.append(row)
+    return sorted(rows, key=_order)
+
+
+def _key(dim: Dim, row: Mapping[str, Any]) -> tuple[Any, ...]:
+    return tuple(row[k] for k in dim.key)
+
+
+def _item_key(dim: Dim, item: Item) -> tuple[Any, ...]:
+    return tuple(item[dim.api[k]] for k in dim.key)
+
+
+def _current_of(dim: Dim, table: DataFrame, item: Item) -> Row:
+    """The current version of the item's key in the table."""
+    rows = [r for r in _versions(table) if r["is_current"] and _key(dim, r) == _item_key(dim, item)]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _incoming_of(dim: Dim, incoming: DataFrame, item: Item) -> Row:
+    """The snapshot row of the item's key."""
+    rows = [r for r in _rows(incoming) if _key(dim, r) == _item_key(dim, item)]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _closed(version: Row, at: datetime) -> Row:
+    """A current version as the closing row should carry it: only valid_to and is_current change."""
+    return {**version, "valid_to": at, "is_current": False}
+
+
+def _opened(incoming: Row, at: datetime, run_key: str) -> Row:
+    """A snapshot row as the new current version should carry it."""
+    return {
+        **incoming,
+        "valid_from": at,
+        "valid_to": OPEN_END,
+        "is_current": True,
+        "source_run_key": run_key,
+    }
+
+
+# --- scd2_changes: nothing changed ------------------------------------------
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_snapshot_with_only_status_and_heartbeat_changes_gives_no_rows(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN the table loaded from a real page, and the next day's run of the same chargers with
+    # only status and heartbeat fields changed (statUpdDt moved, lastTedt and nowTsdt empty)
+    table = _table(spark, dim, (DAY_1, RUN_1, INFO_ITEMS))
+    heartbeat = [
+        _like(item, stat="3", statUpdDt="20261110181000", lastTedt="", nowTsdt="")
+        for item in INFO_ITEMS
+    ]
+
+    # WHEN the next day's snapshot is compared with the table
+    changes = _changes(dim, table, _snapshot(spark, dim, heartbeat), DAY_2, RUN_2)
+
+    # THEN there is nothing to merge
+    assert changes.count() == 0
+
+
+# --- scd2_changes: changed, new and gone keys -------------------------------
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_changed_key_closes_its_current_version_changing_only_valid_to_and_is_current(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN a table holding A and B, and a snapshot in which A's attributes changed
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B]))
+    before = _current_of(dim, table, A)
+    incoming = _snapshot(spark, dim, [A_CHANGED, B])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_2, RUN_2))
+
+    # THEN A's current version comes back with its attributes, row_hash, valid_from and
+    # source_run_key as they were, closed at the new run's collected_at
+    assert [r for r in result if not r["is_current"]] == [_closed(before, DAY_2)]
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_changed_key_opens_a_new_version_with_the_snapshot_attributes(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN a table holding A and B, and a snapshot in which A's attributes changed
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B]))
+    incoming = _snapshot(spark, dim, [A_CHANGED, B])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_2, RUN_2))
+
+    # THEN A gets a current version carrying the snapshot row, valid from the new run's
+    # collected_at to the open end, made by the new run
+    expected = _opened(_incoming_of(dim, incoming, A_CHANGED), DAY_2, RUN_2)
+    assert [r for r in result if r["is_current"]] == [expected]
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_new_key_opens_a_version_and_closes_nothing(spark: SparkSession, dim: Dim) -> None:
+    # GIVEN a table holding A, and a snapshot with A unchanged and B added
+    table = _table(spark, dim, (DAY_1, RUN_1, [A]))
+    incoming = _snapshot(spark, dim, [A, B])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_2, RUN_2))
+
+    # THEN the only row is B's first version
+    assert result == [_opened(_incoming_of(dim, incoming, B), DAY_2, RUN_2)]
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_gone_key_closes_its_current_version_unchanged_and_opens_nothing(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN a table holding A and B, and a snapshot with A unchanged and B missing
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B]))
+    before = _current_of(dim, table, B)
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, _snapshot(spark, dim, [A]), DAY_2, RUN_2))
+
+    # THEN the only row is B's current version, closed with every other column as it was
+    assert result == [_closed(before, DAY_2)]
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_gives_rows_only_for_changed_new_and_gone_keys(spark: SparkSession, dim: Dim) -> None:
+    # GIVEN a table holding A, B and C, and a snapshot where A changed, B is gone, C is unchanged
+    # and D is new
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B, C]))
+    incoming = _snapshot(spark, dim, [A_CHANGED, C, D])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_2, RUN_2))
+
+    # THEN A is closed and reopened, B closed, D opened, and C does not appear
+    expected = [
+        (*_item_key(dim, A), False),
+        (*_item_key(dim, A), True),
+        (*_item_key(dim, B), False),
+        (*_item_key(dim, D), True),
+    ]
+    assert sorted((*_key(dim, r), r["is_current"]) for r in result) == sorted(expected)
+
+
+MOVED_CHARGERS = [
+    pytest.param({"chgerId": "02"}, id="same_station_other_charger_id"),
+    pytest.param({"statId": "ME999999"}, id="same_charger_id_other_station"),
+]
+
+
+@pytest.mark.parametrize("other_key", MOVED_CHARGERS)
+def test_scd2_charger_sharing_only_part_of_the_key_is_another_charger(
+    spark: SparkSession, other_key: dict[str, str]
+) -> None:
+    # GIVEN a table holding charger A, and a snapshot whose only charger has A's attributes
+    # (so the same row_hash) but differs from A in one key column
+    table = _table(spark, CHARGER, (DAY_1, RUN_1, [A]))
+    before = _current_of(CHARGER, table, A)
+    other = _like(A, **other_key)
+    incoming = _snapshot(spark, CHARGER, [other])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(CHARGER, table, incoming, DAY_2, RUN_2))
+
+    # THEN A is closed and the other charger opened, instead of matching A as unchanged
+    expected = [
+        _closed(before, DAY_2),
+        _opened(_incoming_of(CHARGER, incoming, other), DAY_2, RUN_2),
+    ]
+    assert result == sorted(expected, key=_order)
+
+
+@pytest.mark.parametrize(("dim", "column"), TEXT_ATTRIBUTES)
+def test_scd2_attribute_that_becomes_blank_opens_a_version_holding_null(
+    spark: SparkSession, dim: Dim, column: str
+) -> None:
+    # GIVEN a table holding A, and a snapshot where one of A's text fields is now empty
+    table = _table(spark, dim, (DAY_1, RUN_1, [A]))
+    blanked = _like(A, **{dim.api[column]: ""})
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, _snapshot(spark, dim, [blanked]), DAY_2, RUN_2))
+
+    # THEN the old version keeps its value and the new current version holds null
+    assert [(r["is_current"], r[column]) for r in result] == [
+        (False, A[dim.api[column]]),
+        (True, None),
+    ]
+
+
+# --- scd2_changes: closed versions are history ------------------------------
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_closed_version_whose_hash_differs_from_the_snapshot_is_not_closed_again(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN A loaded on day 1 and changed on day 2, so the table holds A's closed day-1 version
+    # (row_hash of A) and its current day-2 version (row_hash of A_CHANGED)
+    table = _table(spark, dim, (DAY_1, RUN_1, [A]), (DAY_2, RUN_2, [A_CHANGED]))
+
+    # WHEN day 3 brings the day-2 attributes again
+    changes = _changes(dim, table, _snapshot(spark, dim, [A_CHANGED]), DAY_3, RUN_3)
+
+    # THEN there is nothing to merge: the day-1 version is left as it is
+    assert changes.count() == 0
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_change_after_a_closed_version_touches_only_the_current_version(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN A loaded on day 1 and changed on day 2 (day-1 version closed, day-2 version current),
+    # and a day-3 snapshot changing A once more
+    table = _table(spark, dim, (DAY_1, RUN_1, [A]), (DAY_2, RUN_2, [A_CHANGED]))
+    current = _current_of(dim, table, A)
+    incoming = _snapshot(spark, dim, [A_CHANGED_AGAIN])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_3, RUN_3))
+
+    # THEN the day-2 version is closed and a day-3 version opened; the day-1 version is not
+    # in the result, so the MERGE leaves it alone
+    assert result == [
+        _closed(current, DAY_3),
+        _opened(_incoming_of(dim, incoming, A_CHANGED_AGAIN), DAY_3, RUN_3),
+    ]
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_reverting_to_closed_attributes_opens_a_new_version_and_leaves_the_old_one(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN A loaded on day 1 and changed on day 2, and a day-3 snapshot bringing back A's day-1
+    # attributes (the same row_hash as the closed day-1 version)
+    table = _table(spark, dim, (DAY_1, RUN_1, [A]), (DAY_2, RUN_2, [A_CHANGED]))
+    current = _current_of(dim, table, A)
+    incoming = _snapshot(spark, dim, [A])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_3, RUN_3))
+
+    # THEN the day-2 version is closed and a new day-3 version opened; the day-1 version is
+    # not reopened
+    assert result == [
+        _closed(current, DAY_3),
+        _opened(_incoming_of(dim, incoming, A), DAY_3, RUN_3),
+    ]
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_key_that_comes_back_after_being_closed_opens_a_new_version_only(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN B loaded on day 1 and gone on day 2 (its only version closed), and a day-3 snapshot
+    # where B is back unchanged
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B]), (DAY_2, RUN_2, [A]))
+    incoming = _snapshot(spark, dim, [A, B])
+
+    # WHEN the snapshot is compared with the table
+    result = _versions(_changes(dim, table, incoming, DAY_3, RUN_3))
+
+    # THEN the only row is a new day-3 version of B; its closed day-1 version is not touched
+    assert result == [_opened(_incoming_of(dim, incoming, B), DAY_3, RUN_3)]
+
+
+# --- scd2_changes: idempotency ----------------------------------------------
+
+RERUNS = [
+    pytest.param((), (DAY_1, RUN_1, INFO_ITEMS), id="first_load_of_a_real_page"),
+    pytest.param(
+        ((DAY_1, RUN_1, [A, B, C]),), (DAY_2, RUN_2, [A_CHANGED, C, D]), id="changed_new_and_gone"
+    ),
+    pytest.param(
+        ((DAY_1, RUN_1, [A]), (DAY_2, RUN_2, [A_CHANGED])),
+        (DAY_3, RUN_3, [A]),
+        id="revert_over_a_closed_version",
+    ),
+]
+
+
+@pytest.mark.parametrize(("history", "load"), RERUNS)
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_same_run_again_after_merging_its_result_gives_no_rows(
+    spark: SparkSession, dim: Dim, history: tuple[Load, ...], load: Load
+) -> None:
+    # GIVEN a table into which a run's result was merged
+    at, run_key, items = load
+    table = _table(spark, dim, *history, load)
+
+    # WHEN the same run is compared again (load_dims rerun before its watermark moved)
+    changes = _changes(dim, table, _snapshot(spark, dim, items), at, run_key)
+
+    # THEN there is nothing to merge
+    assert changes.count() == 0
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_gives_the_same_rows_when_called_twice_on_the_same_input(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN a table holding A, B and C, and a snapshot with changed, new and gone keys
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B, C]))
+    incoming = _snapshot(spark, dim, [A_CHANGED, C, D])
+
+    # WHEN the changes are computed twice
+    first = _versions(_changes(dim, table, incoming, DAY_2, RUN_2))
+    second = _versions(_changes(dim, table, incoming, DAY_2, RUN_2))
+
+    # THEN both give the same rows
+    assert first == second
+
+
+# --- scd2_changes: empty inputs ---------------------------------------------
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_first_load_into_an_empty_table_opens_every_snapshot_row(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN an empty table and a real page
+    incoming = _snapshot(spark, dim, INFO_ITEMS)
+
+    # WHEN the page is compared with the table
+    result = _versions(_changes(dim, _empty_table(spark, dim), incoming, DAY_1, RUN_1))
+
+    # THEN every snapshot row becomes a current version made by this run
+    expected = [_opened(r, DAY_1, RUN_1) for r in _rows(incoming)]
+    assert result == sorted(expected, key=_order)
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_empty_table_and_empty_snapshot_give_no_rows_with_the_table_columns(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN an empty table and a run with no rows
+    table = _empty_table(spark, dim)
+
+    # WHEN the empty snapshot is compared with the table
+    changes = _changes(dim, table, _snapshot(spark, dim, []), DAY_1, RUN_1)
+
+    # THEN there are no rows, but the columns are still the table's
+    assert (changes.columns, changes.count()) == (table.columns, 0)
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_empty_snapshot_closes_every_current_version(spark: SparkSession, dim: Dim) -> None:
+    # GIVEN a table loaded from a real page, and a run with no rows
+    # (load_dims must not apply such a run; this pins what scd2_changes itself does with it)
+    table = _table(spark, dim, (DAY_1, RUN_1, INFO_ITEMS))
+
+    # WHEN the empty snapshot is compared with the table
+    result = _versions(_changes(dim, table, _snapshot(spark, dim, []), DAY_2, RUN_2))
+
+    # THEN every current version is closed and nothing is opened
+    assert result == [_closed(r, DAY_2) for r in _versions(table)]
+
+
+# --- scd2_changes: output schema --------------------------------------------
+
+COLUMN_ORDERS = [pytest.param(False, id="table_order"), pytest.param(True, id="reversed_order")]
+
+
+@pytest.mark.parametrize("reverse", COLUMN_ORDERS)
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_result_columns_are_the_current_columns_in_the_same_order(
+    spark: SparkSession, dim: Dim, reverse: bool
+) -> None:
+    # GIVEN a table holding A, B and C, read with its columns in table order or reversed, and a
+    # snapshot that closes and opens versions
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B, C]))
+    current = table.select(*reversed(table.columns)) if reverse else table
+
+    # WHEN the snapshot is compared with the table
+    changes = _changes(dim, current, _snapshot(spark, dim, [A_CHANGED, C, D]), DAY_2, RUN_2)
+
+    # THEN the result has current's columns, in current's order
+    assert changes.columns == current.columns
+
+
+@pytest.mark.parametrize("dim", BOTH)
+def test_scd2_result_column_types_are_the_current_column_types(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN a table holding A, B and C, and a snapshot that closes and opens versions
+    table = _table(spark, dim, (DAY_1, RUN_1, [A, B, C]))
+
+    # WHEN the snapshot is compared with the table
+    changes = _changes(dim, table, _snapshot(spark, dim, [A_CHANGED, C, D]), DAY_2, RUN_2)
+
+    # THEN every column has the table's type
+    assert changes.dtypes == table.dtypes
