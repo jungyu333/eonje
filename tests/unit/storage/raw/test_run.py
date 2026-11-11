@@ -1,5 +1,6 @@
 import io
 import json
+import re
 from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,21 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 from eonje.client.response import parse_response
 from eonje.client.types import Page
-from eonje.storage.raw.paths import RawRun, manifest_path, page_path, run_prefix
-from eonje.storage.raw.run import MANIFEST_VERSION, RawRunWriter, RunManifest, read_manifest
+from eonje.storage.raw.paths import (
+    Dataset,
+    RawRun,
+    manifest_path,
+    page_path,
+    partition_date,
+    run_prefix,
+)
+from eonje.storage.raw.run import (
+    MANIFEST_VERSION,
+    RawRunWriter,
+    RunManifest,
+    list_manifests,
+    read_manifest,
+)
 
 FIXTURES = Path(__file__).resolve().parents[3] / "fixtures" / "evcharger"
 BUCKET = "eonje-raw"
@@ -53,6 +67,18 @@ def _started(
     writer = RawRunWriter(fs, BUCKET, run, collected_at, page_size=PAGE_SIZE)
     writer.start()
     return writer
+
+
+def _finished(
+    fs: MemoryFileSystem,
+    run: RawRun,
+    collected_at: datetime,
+    items: list[dict[str, Any]],
+    operation: str = "getChargerStatus",
+) -> RunManifest:
+    writer = _started(fs, run, collected_at=collected_at)
+    writer.write(_page(items, operation=operation, fetched_at=collected_at + timedelta(seconds=3)))
+    return writer.finish()
 
 
 def _objects(fs: MemoryFileSystem, prefix: str) -> list[str]:
@@ -633,3 +659,164 @@ def test_read_manifest_rejects_a_manifest_missing_fields(
         read_manifest(mem_fs, BUCKET, run)
     assert "page_size" in str(exc.value)
     assert "expected_pages" in str(exc.value)
+
+
+def test_read_manifest_returns_none_for_a_never_started_run_beside_a_completed_one(
+    mem_fs: MemoryFileSystem, run: RawRun, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN a completed run on the same day
+    sibling = RawRun(dataset=run.dataset, dt=run.dt, run_key="20261026T100000")
+    _finished(mem_fs, sibling, COLLECTED_AT, status_items)
+    # WHEN the manifest of a run that was never started is read
+    # THEN there is none; the sibling's manifest is not picked up
+    assert read_manifest(mem_fs, BUCKET, run) is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "removed"),
+    [
+        ({"version": MANIFEST_VERSION + 1}, []),
+        ({}, ["page_size"]),
+    ],
+    ids=["unknown_version", "missing_field"],
+)
+def test_read_manifest_errors_name_the_manifest_path(
+    mem_fs: MemoryFileSystem,
+    run: RawRun,
+    status_items: list[dict[str, Any]],
+    overrides: dict[str, Any],
+    removed: list[str],
+) -> None:
+    # GIVEN a finished run whose manifest was then made unreadable
+    _finished(mem_fs, run, COLLECTED_AT, status_items)
+    path = manifest_path(BUCKET, run)
+    data = json.loads(mem_fs.cat_file(path))
+    data.update(overrides)
+    for name in removed:
+        del data[name]
+    mem_fs.pipe_file(path, json.dumps(data).encode("utf-8"))
+
+    # WHEN / THEN reading it fails with an error that points at the manifest object
+    with pytest.raises(ValueError, match=re.escape(path)):
+        read_manifest(mem_fs, BUCKET, run)
+
+
+# --- list_manifests -------------------------------------------------------------------
+
+
+def test_list_manifests_of_an_empty_store_is_an_empty_list(mem_fs: MemoryFileSystem) -> None:
+    # GIVEN nothing written to the bucket
+    # WHEN the dataset is listed
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS)
+    # THEN the result is an empty list, not an error
+    assert listed == []
+
+
+def test_list_manifests_skips_runs_without_a_manifest(
+    mem_fs: MemoryFileSystem, run: RawRun, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN a completed run
+    completed = _finished(mem_fs, run, COLLECTED_AT, status_items)
+    # AND a later run that wrote a page but never finished
+    unfinished = RawRun(dataset=run.dataset, dt=run.dt, run_key="20261026T102000")
+    writer = _started(mem_fs, unfinished, collected_at=COLLECTED_AT + timedelta(minutes=10))
+    writer.write(_page(status_items))
+
+    # WHEN the dataset is listed
+    listed = list_manifests(mem_fs, BUCKET, run.dataset)
+
+    # THEN only the completed run appears
+    assert listed == [completed]
+
+
+def test_list_manifests_orders_runs_across_dates_by_collected_at(
+    mem_fs: MemoryFileSystem, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN completed runs on two KST dates, written out of order, whose run_keys
+    # (manual__ < scheduled__) and paths sort differently from their collection times
+    runs = [
+        ("manual__2026-10-26T12-00-00", datetime(2026, 10, 26, 12, 0, tzinfo=UTC)),
+        ("scheduled__2026-10-25T10-00-00", datetime(2026, 10, 25, 10, 0, tzinfo=UTC)),
+        ("scheduled__2026-10-26T01-00-00", datetime(2026, 10, 26, 1, 0, tzinfo=UTC)),
+    ]
+    for run_key, at in runs:
+        r = RawRun(dataset=Dataset.CHARGER_STATUS, dt=partition_date(at), run_key=run_key)
+        _finished(mem_fs, r, at, status_items)
+
+    # WHEN the dataset is listed
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS)
+
+    # THEN runs come oldest collection first, regardless of date folder or run_key
+    assert [m.run_key for m in listed] == [
+        "scheduled__2026-10-25T10-00-00",
+        "scheduled__2026-10-26T01-00-00",
+        "manual__2026-10-26T12-00-00",
+    ]
+
+
+def test_list_manifests_orders_runs_with_the_same_collected_at_by_run_key(
+    mem_fs: MemoryFileSystem,
+    run: RawRun,
+    status_items: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GIVEN a delta run and a full run sharing one collected_at (same logical time)
+    for run_key in ("full__20261026T101000", "delta__20261026T101000"):
+        r = RawRun(dataset=run.dataset, dt=run.dt, run_key=run_key)
+        _finished(mem_fs, r, COLLECTED_AT, status_items)
+
+    # AND a store that lists objects in reverse key order (listing order is not a contract)
+    glob = mem_fs.glob
+
+    def reversed_glob(*args: Any, **kwargs: Any) -> list[str]:
+        return list(reversed(glob(*args, **kwargs)))
+
+    monkeypatch.setattr(mem_fs, "glob", reversed_glob)
+
+    # WHEN the dataset is listed
+    listed = list_manifests(mem_fs, BUCKET, run.dataset)
+
+    # THEN the tie is broken by run_key ascending
+    assert [m.run_key for m in listed] == ["delta__20261026T101000", "full__20261026T101000"]
+
+
+@pytest.mark.parametrize("dataset", list(Dataset), ids=str)
+def test_list_manifests_returns_only_runs_of_the_requested_dataset(
+    mem_fs: MemoryFileSystem,
+    run: RawRun,
+    status_items: list[dict[str, Any]],
+    dataset: Dataset,
+) -> None:
+    # GIVEN a completed status run and a completed info run with the same date and run_key
+    info_run = RawRun(dataset=Dataset.CHARGER_INFO, dt=run.dt, run_key=run.run_key)
+    info_items = _fixture_items("real_info_page.json")
+    finished = {
+        Dataset.CHARGER_STATUS: _finished(mem_fs, run, COLLECTED_AT, status_items),
+        Dataset.CHARGER_INFO: _finished(
+            mem_fs, info_run, COLLECTED_AT, info_items, operation="getChargerInfo"
+        ),
+    }
+
+    # WHEN one dataset is listed
+    listed = list_manifests(mem_fs, BUCKET, dataset)
+
+    # THEN only that dataset's run appears
+    assert listed == [finished[dataset]]
+
+
+# --- RunManifest.collected ------------------------------------------------------------
+
+
+def test_collected_is_the_timezone_aware_utc_instant_of_collected_at(
+    mem_fs: MemoryFileSystem, run: RawRun, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN a run collected at 19:10 KST
+    kst_at = datetime(2026, 10, 26, 19, 10, 0, tzinfo=KST)
+    manifest = _finished(mem_fs, run, kst_at, status_items)
+
+    # WHEN its collection time is read as a datetime
+    collected = manifest.collected
+
+    # THEN it carries a timezone (UTC) and is the same instant
+    assert collected.utcoffset() == timedelta(0)
+    assert collected == kst_at
