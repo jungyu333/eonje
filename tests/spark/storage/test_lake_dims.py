@@ -1,5 +1,6 @@
 """Spark tests for eonje.storage.lake.dims: merge_changes applies scd2_changes' rows to a real
-Iceberg dim table, and current_rows counts the table's current versions.
+Iceberg dim table and reports how many versions it closed and opened, and current_rows counts the
+table's current versions.
 
 Every test creates core.dim_station or core.dim_charger with create_table_sql in the throwaway
 `lake` catalog of tests/spark/conftest.py and drops it when the test ends. A load is what load_dims
@@ -113,10 +114,15 @@ def _changes(spark: SparkSession, dim: Dim, load: Load) -> DataFrame:
     return scd2_changes(current, incoming, dim.key, collected_at=at, run_key=run_key)
 
 
+def _merge(spark: SparkSession, dim: Dim, load: Load) -> lake_dims.MergeCounts:
+    """load_dims applying one full run; returns what merge_changes reports."""
+    return lake_dims.merge_changes(spark, dim.table, dim.key, _changes(spark, dim, load))
+
+
 def _load(spark: SparkSession, dim: Dim, *loads: Load) -> None:
     """load_dims applying each full run in order."""
     for load in loads:
-        lake_dims.merge_changes(spark, dim.table, dim.key, _changes(spark, dim, load))
+        _merge(spark, dim, load)
 
 
 def _order(row: Row) -> tuple[Any, ...]:
@@ -406,6 +412,74 @@ def test_a_load_that_closes_and_opens_versions_is_one_iceberg_commit(
 
     # THEN the table has exactly one more snapshot
     assert _commits(spark, dim) == before + 1
+
+
+# --- merge counts -----------------------------------------------------------
+
+
+def test_first_load_into_an_empty_table_counts_none_closed_and_one_opened_per_key(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN the newly created, empty dim table and the real page (10 chargers at 8 stations)
+
+    # WHEN the page is loaded
+    counts = _merge(spark, dim, (DAY_1, RUN_1, INFO_ITEMS))
+
+    # THEN nothing is closed and one version is opened per key on the page
+    keys = len({_item_key(dim, item) for item in INFO_ITEMS})
+    assert counts == lake_dims.MergeCounts(closed=0, opened=keys)
+
+
+def test_changed_attributes_of_one_key_count_one_closed_and_one_opened(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN A and B loaded on day 1
+    _load(spark, dim, (DAY_1, RUN_1, [A, B]))
+
+    # WHEN day 2 brings A with changed attributes and B as it was
+    counts = _merge(spark, dim, (DAY_2, RUN_2, [A_CHANGED, B]))
+
+    # THEN A's old version is the one closed and its new version the one opened
+    assert counts == lake_dims.MergeCounts(closed=1, opened=1)
+
+
+def test_gone_key_counts_one_closed_and_none_opened(spark: SparkSession, dim: Dim) -> None:
+    # GIVEN A and B loaded on day 1
+    _load(spark, dim, (DAY_1, RUN_1, [A, B]))
+
+    # WHEN day 2's snapshot no longer has B
+    counts = _merge(spark, dim, (DAY_2, RUN_2, [A]))
+
+    # THEN B's version is the one closed and nothing is opened
+    assert counts == lake_dims.MergeCounts(closed=1, opened=0)
+
+
+def test_key_that_comes_back_counts_none_closed_and_one_opened(
+    spark: SparkSession, dim: Dim
+) -> None:
+    # GIVEN B loaded on day 1 and gone on day 2, so its only version is already closed
+    _load(spark, dim, (DAY_1, RUN_1, [A, B]), (DAY_2, RUN_2, [A]))
+
+    # WHEN day 3 brings B back unchanged
+    counts = _merge(spark, dim, (DAY_3, RUN_3, [A, B]))
+
+    # THEN nothing is closed (B has no current version to close) and B's new version is opened
+    assert counts == lake_dims.MergeCounts(closed=0, opened=1)
+
+
+@pytest.mark.parametrize(("history", "load"), RERUNS)
+def test_loading_the_same_run_again_counts_none_closed_and_none_opened(
+    spark: SparkSession, dim: Dim, history: tuple[Load, ...], load: Load
+) -> None:
+    # GIVEN a table after its history and one more run
+    _load(spark, dim, *history, load)
+
+    # WHEN the same run is loaded again (load_dims rerun before its watermark moved, so the
+    # changes are compared with the table as the first load left it)
+    counts = _merge(spark, dim, load)
+
+    # THEN nothing is closed or opened
+    assert counts == lake_dims.MergeCounts(closed=0, opened=0)
 
 
 # --- current_rows -----------------------------------------------------------

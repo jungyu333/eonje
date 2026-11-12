@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,17 @@ if TYPE_CHECKING:
     from eonje.storage.raw.run import RunManifest
 
 _CHANGES_VIEW = "eonje_scd2_changes"
+
+
+@dataclass(frozen=True)
+class MergeCounts:
+    """merge_changes에 넘긴 변경 행 수. MERGE가 실제로 바꾼 행 수를 다시 센 것은 아니다.
+
+    현재 테이블에서 변경분을 새로 계산해 넘기면(load_dims) 둘은 같다.
+    """
+
+    closed: int
+    opened: int
 
 
 def read_raw_run(spark: SparkSession, bucket: str, manifest: RunManifest) -> DataFrame:
@@ -32,14 +44,16 @@ def current_rows(spark: SparkSession, table: IcebergTable) -> int:
 
 def merge_changes(
     spark: SparkSession, table: IcebergTable, key: tuple[str, ...], changes: DataFrame
-) -> None:
+) -> MergeCounts:
     """scd2_changes의 결과를 (키, valid_from) 기준으로 차원 테이블에 반영한다. 한 번의 커밋이다.
 
     닫는 행은 기존 버전과 valid_from이 같아 valid_to·is_current만 갱신되고, 새 버전은 추가된다.
+    돌려주는 수는 changes의 행 수다. 닫는 행은 is_current가 False, 여는 행은 True다.
     """
     # 변경분을 먼저 계산해 고정한다. changes는 대상 테이블을 읽어 만든 것이라, 그대로 뷰로
     # 등록하면 MERGE 소스가 대상 테이블을 다시 참조해 Spark 4.1에서 계획 수립이 실패한다.
-    changes.localCheckpoint().createOrReplaceTempView(_CHANGES_VIEW)
+    frozen = changes.localCheckpoint()
+    frozen.createOrReplaceTempView(_CHANGES_VIEW)
     on = " AND ".join(f"t.{column} = s.{column}" for column in (*key, "valid_from"))
 
     spark.sql(
@@ -50,4 +64,8 @@ def merge_changes(
         WHEN MATCHED THEN UPDATE SET t.valid_to = s.valid_to, t.is_current = s.is_current
         WHEN NOT MATCHED THEN INSERT *
         """
+    )
+    return MergeCounts(
+        closed=frozen.where("NOT is_current").count(),
+        opened=frozen.where("is_current").count(),
     )
