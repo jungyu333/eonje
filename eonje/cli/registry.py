@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from eonje.cli.context import JobContext
-from eonje.cli.jobs import ensure_iceberg_tables, fetch_delta, fetch_master, spark_check
+from eonje.cli.jobs import ensure_iceberg_tables, fetch_delta, fetch_master, load_dims, spark_check
 
 Job = Callable[[JobContext], int]
 
@@ -12,4 +12,5 @@ JOBS: dict[str, Job] = {
     "fetch-master": fetch_master.run,
     "spark-check": spark_check.run,
     "ensure-iceberg-tables": ensure_iceberg_tables.run,
+    "load-dims": load_dims.run,
 }
