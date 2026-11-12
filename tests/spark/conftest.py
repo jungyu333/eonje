@@ -21,14 +21,26 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 
 @pytest.fixture(scope="session")
-def spark() -> Iterator[SparkSession]:
-    """One local SparkSession for the whole run (starting a JVM per test is too slow)."""
+def spark(tmp_path_factory: pytest.TempPathFactory) -> Iterator[SparkSession]:
+    """One local SparkSession for the whole run (starting a JVM per test is too slow).
+
+    `lake` is a throwaway Iceberg catalog in a temp folder (same name as production, so the
+    SQL under test is unchanged). Production uses the JDBC catalog on S3 instead.
+    """
+    warehouse = tmp_path_factory.mktemp("warehouse")
     session = (
         SparkSession.builder.master("local[1]")
         .appName("eonje-tests")
         .config("spark.sql.session.timeZone", "Asia/Seoul")
         .config("spark.sql.shuffle.partitions", "1")
         .config("spark.ui.enabled", "false")
+        .config(
+            "spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+        )
+        .config("spark.sql.catalog.lake", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.lake.type", "hadoop")
+        .config("spark.sql.catalog.lake.warehouse", str(warehouse))
         .getOrCreate()
     )
     yield session
