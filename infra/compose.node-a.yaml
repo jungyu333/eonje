@@ -210,6 +210,7 @@ services:
         set -euo pipefail
         airflow db migrate
         airflow pools set evcharger_api 1 "EvCharger API calls (one at a time, shared daily quota)"
+        airflow pools set spark 1 "Spark apps (one at a time while node A is the only worker)"
 
   airflow-api-server:
     <<: *airflow
