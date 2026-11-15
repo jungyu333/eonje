@@ -105,11 +105,15 @@ eonje/
     client/               # API 클라이언트: 요청 조립, 페이지네이션, 재시도, 응답 검증
     budget/               # 호출 예산: 오늘 사용량 조회, 실행 가능 여부·페이지 상한 판단
     collect/              # 수집 흐름: 완료·지연 확인 → 예산 판단 → 페이지 순회 → 원본 run 쓰기. client·budget·storage를 조합하고, HTTP·파일시스템·DB 세션은 주입받는다
+    load/                 # 적재 흐름: 워터마크 뒤의 원본 run을 DW에 반영 (건너뛸 run 판단 → 변환 → MERGE → 워터마크). 원본 읽기와 워터마크 갱신은 주입받는다
+      policy.py           # full run을 반영해도 되는지 판단 (0건·잘림·행 수 급감). 순수 함수
+      dims.py             # 마스터 full run → dim_station·dim_charger (SCD2)
     storage/              # 저장소마다 하위 패키지 하나 (2026.11.05 정리)
       postgres/
         models.py         # SQLAlchemy ORM 모델 (Postgres 스키마 mart·ops의 단일 출처. Alembic autogenerate 대상)
         db.py             # 엔진·세션, 스테이징 → INSERT ... ON CONFLICT 반영
         call_log.py       # api_call_log 기록·조회 (예산 관리자가 읽음)
+        watermark.py      # 변환 워터마크 읽기·올리기 (뒤로 가지 않는다)
       raw/                # 원본 (SeaweedFS Parquet) — pyarrow + s3fs
         fs.py             # S3 파일시스템, 접속 키 확인
         paths.py          # 원본 경로 규칙 (run 단위 prefix, 페이지·manifest 경로)
@@ -118,8 +122,9 @@ eonje/
       lake/               # DW (Iceberg) — Spark
         spark.py          # SparkSession 생성(설정·Iceberg 카탈로그 주입), s3a 읽기, JDBC 스테이징 쓰기
         iceberg.py        # Iceberg 테이블 정의(스키마·파티션)의 단일 출처. 멱등한 생성·컬럼 추가로 적용 (3단계)
+        dims.py           # 차원 적재의 읽기·쓰기: 원본 run 읽기(s3a), 현재 버전 수, 변경분 MERGE
     transform/            # 순수 함수. Spark DataFrame in → DataFrame out. I/O 없음
-      dims.py             # SCD2 비교·갱신 행 생성
+      dims.py             # 마스터 필드 → 차원 행(충전소·충전기: 내부 어휘, 타입, row_hash), SCD2 비교·갱신 행 생성
       observations.py     # API 어휘 → 내부 어휘, 타입 변환, run 안 중복 제거 (observed_at = run의 collected_at)
       transitions.py      # charger_state와 비교 → 전이 이벤트
       sessions.py         # last_ts/last_te/now_ts → 세션 upsert 행
@@ -147,7 +152,9 @@ eonje/
     migrations/           # Alembic — models.py에서 autogenerate, 검토 후 커밋
     .env.example
   tests/
-    unit/                 # transform·budget·client·cli 단위 테스트 (Airflow·네트워크 없이). Spark 변환은 로컬 SparkSession
+    unit/                 # budget·client·cli·collect·load 정책 단위 테스트 (Airflow·네트워크·JVM 없이)
+    db/                   # Postgres가 필요한 테스트 (`db` 마커, `make test-db`)
+    spark/                # JVM이 필요한 테스트 (`spark` 마커): transform, storage/lake, load 흐름. eonje-spark 이미지 안에서 돈다 (`make test-spark`)
     fixtures/             # 실제 API 응답 샘플 (키 제거)
   .github/workflows/
     ci.yml                # ruff, mypy, pytest, 이미지 빌드 (PR)
@@ -156,8 +163,8 @@ eonje/
 
 경계 규칙:
 - **Airflow를 아는 코드는 `dags/`뿐.** `eonje`는 Airflow 없이 import·테스트되고, 런타임에서도 별도 컨테이너라 Airflow 패키지가 아예 없다. CLI로 백필할 때도 같은 진입점.
-- **외부 I/O를 아는 코드는 `client/`와 `storage/`뿐.** SparkSession 생성, s3a 읽기, JDBC 쓰기도 `storage/`에 둔다. `transform/`은 DataFrame만 받는 순수 함수라 로컬 SparkSession과 fixture로 테스트한다.
-- **API 어휘(`statId`, `chgerId`, `stat`…)는 `observations.py`에서 내부 어휘(`stat_id`, `charger_id`, `status_code`)로 한 번 번역**하고, 그 아래로는 내부 어휘만 쓴다. 응답 필드가 바뀌어도 수정 지점은 한 곳.
+- **외부 I/O를 아는 코드는 `client/`와 `storage/`뿐.** SparkSession 생성, s3a 읽기, JDBC 쓰기도 `storage/`에 둔다. `transform/`은 DataFrame만 받는 순수 함수라 로컬 SparkSession과 fixture로 테스트한다 (`tests/spark`, 8.2).
+- **API 어휘(`statId`, `chgerId`, `stat`…)는 `transform/`에서 내부 어휘(`stat_id`, `charger_id`, `status_code`)로 한 번 번역**하고(상태 변경분은 `observations.py`, 마스터는 `dims.py`), 그 아래로는 내부 어휘만 쓴다. 응답 필드가 바뀌어도 수정 지점은 한 곳.
 - 설정값은 `config.py`에서만 읽는다. DAG 스케줄 간격도 거기서 가져온다 (DAG 파일은 환경변수를 직접 읽음 — eonje import 불가).
 - **`__init__.py`에는 로직을 두지 않는다.** 전부 빈 파일. re-export도 하지 않아 import는 항상 모듈까지 적는다 (`from eonje.cli.app import main`). `__main__.py`는 위임 두 줄만.
 - **스키마의 단일 출처는 저장소마다 하나.** Postgres(`mart`·`ops`)는 `models.py` — 파이프라인 적재와 API 조회가 같은 모델을 쓰고, Alembic이 여기서 만든다. Iceberg(`stg`·`core`)는 `storage/lake/iceberg.py` — Alembic 대상이 아니므로 정의를 코드로 두고 멱등한 생성(`CREATE TABLE IF NOT EXISTS`)·컬럼 추가 잡(`ensure-iceberg-tables`)으로 적용한다. 두 스키마 모두 CD가 배포 때 적용한다 (8.3).
@@ -262,9 +269,9 @@ flowchart TB
 | 컨테이너 | Docker, docker compose (노드별 파일) | 개발 PC = 노드 A 구성 |
 | 이미지 레지스트리 | GHCR (`ghcr.io/jungyu333/eonje-*:<git-sha>`) | Actions `GITHUB_TOKEN`으로 푸시. 공개 이미지라 서버 pull에 인증 불필요. compose와 DAG는 이미지 이름을 `${EONJE_IMAGE_REPO}-<runtime>:${EONJE_IMAGE_TAG}`로 만든다: 개발 PC `eonje`·`dev`(`make build`), 운영 `ghcr.io/jungyu333/eonje`·git sha |
 | 운영 노드 | 집 미니PC (A 상시, B는 부족 신호 시 추가) | 8.1 |
-| 테스트 | pytest, 실제 응답 fixture, 로컬 SparkSession | `transform/`은 fixture로 커버. DB 테스트는 `db` 마커 + Actions `services:` Postgres |
+| 테스트 | pytest, 실제 응답 fixture, 로컬 SparkSession | `transform/`은 fixture로 커버. DB 테스트는 `db` 마커 + Actions `services:` Postgres. Spark 테스트는 `spark` 마커로 `eonje-spark` 이미지 안에서 돈다 (`make test-spark`, 8.2) |
 | 품질 | ruff (lint·format), mypy strict, pre-commit | pre-commit 훅: ruff(프로젝트 venv 버전), ruff-format, EOF·공백·YAML·TOML 검사, 대용량 파일·개인키 차단. mypy는 CI |
-| CI | GitHub Actions | PR: ruff + mypy + pytest, collector 이미지 스모크, Airflow 이미지 + DAG 무결성 검사, DB 테스트. main: 전부 통과하면 이미지를 GHCR에 `<sha>`로 푸시 |
+| CI | GitHub Actions | PR: ruff + mypy + pytest, collector 이미지 스모크, Airflow 이미지 + DAG 무결성 검사, DB 테스트, Spark 이미지 스모크 + Spark 테스트. main: 전부 통과하면 이미지를 GHCR에 `<sha>`로 푸시 |
 | CD | GitHub Actions + Tailscale + SSH | main: 이미지 GHCR 푸시 → 노드에 compose 배포 → 헬스체크 → `deploy` ref 이동 (8.3) |
 | 알림·관측 | A 단독: 텔레그램 봇. B 추가 후: Prometheus + Grafana + Loki (B에서 실행) | A가 죽어도 B에서 알림 발송 |
 | 백업 | 로컬: B로 버킷 동기화(`weed filer.sync` 또는 rclone)·`pg_dump`. 오프사이트: R2 또는 B2 | 8.5 |
@@ -392,6 +399,13 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 - **키가 있는 테이블은 단순 `append`로 쓰지 않는다.** Iceberg에는 고유 제약이 없어 재실행하면 중복 행이 생긴다. 키 충돌 무시는 `MERGE ... WHEN NOT MATCHED INSERT`로 구현한다. 단순 `append`는 키가 없는 테이블에만
 - **`MERGE`의 `ON` 절에 파티션 컬럼 범위를 함께 건다.** 키만 쓰면 매번 대상 테이블 전체를 읽어 비용이 데이터와 함께 계속 커진다. 파티션 컬럼(`observed_date`·`at_date`·`started_date`)은 키 시각에서 파생되므로, 소스에 나온 날짜만 대상으로 좁혀도 결과는 같다 (예: `t.observed_date IN (date'2026-11-03', ...) AND t.stat_id = s.stat_id AND ...`). Spark는 `MERGE`의 `ON` 절에 서브쿼리를 받지 않으므로, 소스에서 날짜를 먼저 모아 **리터럴로** 넣는다(PoC에서 확인)
 - 디멘션 연결: 팩트 시각이 디멘션의 `[valid_from, valid_to)`에 들어가는 버전. 현재 버전은 `valid_to = 9999-12-31`, `is_current = true`
+- **차원 SCD2 규칙 (`transform/dims.py`, 2026.11.15).** 마스터 run 하나는 그 시점의 전체 스냅샷이다. 현재 버전(`is_current`)과 `row_hash`를 비교해 바뀐 것만 반영한다
+  - 속성이 바뀐 키: 현재 버전을 닫고(`valid_to` = run의 `collected_at`, `is_current = false`) 새 버전을 연다(`valid_from` = `collected_at`)
+  - 스냅샷에 없는 키: 현재 버전을 닫기만 한다. 다시 나타나면 새 버전을 연다 (그 사이 구간에는 버전이 없다)
+  - 바뀐 게 없으면 변경분이 0행이다. 같은 run을 다시 반영해도 결과가 같다
+  - 값 정리: 앞뒤 공백(탭·전각 공백 포함)을 지우고 빈 값은 NULL, 숫자는 `try_cast`(숫자가 아니면 NULL). `row_hash`는 원문이 아니라 이렇게 정리·변환한 저장값으로 계산한다 (원문으로 계산하면 `"050"`과 `"50"`이 저장값은 같은데 다른 버전이 된다)
+  - 키당 한 행: 충전소 속성은 충전기 행마다 반복되므로 `chgerId`가 가장 작은 행의 값을 쓴다. 같은 충전기가 두 번 나오면(페이징 드리프트) 나중 페이지의 행을 쓴다. 키가 빈 행은 버린다
+  - 반영은 테이블마다 `MERGE` 한 번(Iceberg 커밋 하나): `(키, valid_from)`이 같으면 `valid_to`·`is_current`만 갱신하고, 없으면 추가한다. 두 차원은 서로 다른 커밋이라 사이에 실패하면 다시 돌려 맞춘다 (변경분을 현재 테이블에서 다시 계산하므로 결과가 같다)
 - 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
 
 ### 서빙·운영 (Postgres `eonje` DB, `storage/postgres/models.py`)
@@ -400,7 +414,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 |---|---|---|---|
 | `ops.charger_state` | `stat_id, charger_id` | 10분마다 갱신 | 충전기별 마지막으로 알려진 상태 (전이 계산용 현재 상태). 갱신이 잦아 DW가 아니라 Postgres |
 | `ops.api_call_log` | `id` (PK), 인덱스 `called_at` | 추가만 | EvCharger API HTTP 시도 1회 = 1행 (재시도 포함, 일일 한도 계산 기준). `called_at`, `job`, `run_id`(Airflow 원문), `operation`, `page_no`, `attempt`, `params`(JSONB, serviceKey 제외), `http_status`, `result_code`, `total_count`, `elapsed_ms`. 지금은 기본 스키마에 있고 `ops`로 옮기는 건 4단계 첫 마이그레이션에서 |
-| `ops.transform_watermark` | `task` | 태스크가 자기 쓰기를 커밋한 뒤 갱신 | 변환 태스크별로 처리한 마지막 원본 run (`collected_at`, `run_key`). 7장 |
+| `ops.transform_watermark` | `task` | 태스크가 자기 쓰기를 커밋한 뒤 갱신 | 변환 태스크별로 처리한 마지막 원본 run (`collected_at`, `run_key`). 더 뒤의 run으로만 갱신된다(뒤로 가지 않는다). `run_key`는 `"C"` 콜레이션이라 DB의 비교 순서가 Python·Spark의 코드포인트 순서와 같다. 지금은 기본 스키마에 있고(`transform_watermark`, `storage/postgres/watermark.py`) `ops`로 옮기는 건 4단계 첫 마이그레이션에서. 7장 |
 | `ops.quality_metrics` | `metric, at` | 추가만 | 결측 구간, 불일치 비율, 미지 코드 수, 페이징 드리프트 |
 | `mart.agg_occupancy_hourly` | `stat_id, charger_id, dow, hour` | 구간 삭제 후 재계산 | 점유율(충전중 비율), 관측 수, 세션 수, 평균 세션 길이 |
 | `mart.agg_station_hourly` | `stat_id, dow, hour` | 구간 삭제 후 재계산 | 충전소 단위 (충전기 합산) |
@@ -420,13 +434,13 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 Airflow 3, LocalExecutor, `DockerOperator`. 각 태스크 = 컨테이너 1개 = `python -m eonje.cli <job> --run-id <run_id> --run-after <dag_run.run_after>`. 이미지는 태스크의 런타임으로 정한다 (C = `eonje-collector`, S = `eonje-spark`). 모든 태스크는 **파티션 키(run_id) 기준 멱등** — 같은 구간을 다시 돌리면 결과가 같다.
 
-Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1)로 한 번에 하나만 돈다. 변환은 **워터마크** 방식이다: 자기 run의 원본만이 아니라 아직 처리하지 않은 원본 run을 전부 처리한다. 그래서 변환이 멈췄다 살아나면 자동으로 따라잡고, 수집은 변환 상태와 무관하게 계속된다.
+Spark 태스크는 pool `spark`(A 단독일 때 슬롯 1, `airflow-init`이 만든다)로 한 번에 하나만 돈다. 변환은 **워터마크** 방식이다: 자기 run의 원본만이 아니라 아직 처리하지 않은 원본 run을 전부 처리한다. 그래서 변환이 멈췄다 살아나면 자동으로 따라잡고, 수집은 변환 상태와 무관하게 계속된다.
 
 ### `ev_master_daily` (1일 1회)
 KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉넉하고 배포와 겹칠 일이 적다. 이 DAG가 도는 KST 03:05~03:35에는 배포하지 않는다: 배포 스크립트는 실행 중인 태스크를 5분까지만 기다려서, 마스터(최대 20분)가 중간에 끊기면 호출을 버리고 재시도한다.
 
 1. `fetch_master` (C, pool `evcharger_api`. 상태 변경분은 이 pool에 넣지 않으므로 마스터가 도는 동안에도 delta는 제때 돈다) — 53페이지 순회, 원본 `charger_info` 저장. 페이지 단위 재시도, 호출 로그 기록. `execution_timeout` 20분(약 7분 소요), 재시도 2회 5분 간격(지연 허용치 60분 안에 든다). **0건이거나 예산으로 잘린 run(`truncated`)도 원본과 manifest는 그대로 남긴다** (API가 실제로 준 것을 남기는 원칙). 차원에 반영할지는 `load_dims`가 정한다 (2026.11.09)
-2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다. **반영하지 않는 full run**: 0건, 예산으로 잘린 run(`truncated`), 행 수가 지금 차원의 현재 충전기 수 × `EONJE_MASTER_MIN_ROW_RATIO`(기본 0.9)보다 적은 run(차원이 비어 있는 첫 적재는 비교하지 않는다). 이런 run을 반영하면 받지 못한 충전소가 철거된 것처럼 현재 버전이 닫힌다. 건너뛴 run은 경고를 남기고 **워터마크를 올리지 않는다**. 뒤에 온 run이 반영되면 워터마크가 그 run까지 넘어가고, 그때까지는 `load_dims`가 돌 때마다 다시 판정한다. 행 수 급감이 실제 변화라면 이후 run도 계속 건너뛰므로, 사람이 확인한 뒤 `EONJE_MASTER_MIN_ROW_RATIO`를 낮추고 다시 돌린다. 그러면 건너뛴 run부터 순서대로 반영돼 버전 구간이 실제 날짜로 남는다 (2026.11.12). 변환 흐름과 달리 지연 여유를 두지 않고 방금 받은 run을 바로 처리한다. 그 결과 워터마크보다 늦게 완료된 옛 full run은 디멘션에 반영하지 않고 버린다 (다음 날 full run이 같은 정보를 다시 준다)
+2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다. **반영하지 않는 full run**: 0건, 예산으로 잘린 run(`truncated`), 행 수가 지금 차원의 현재 충전기 수 × `EONJE_MASTER_MIN_ROW_RATIO`(기본 0.9)보다 적은 run(차원이 비어 있는 첫 적재는 비교하지 않는다). 이런 run을 반영하면 받지 못한 충전소가 철거된 것처럼 현재 버전이 닫힌다. 건너뛴 run은 경고를 남기고 **워터마크를 올리지 않는다**. 뒤에 온 run이 반영되면 워터마크가 그 run까지 넘어가고, 그때까지는 `load_dims`가 돌 때마다 다시 판정한다. 행 수 급감이 실제 변화라면 이후 run도 계속 건너뛰므로, 사람이 확인한 뒤 `EONJE_MASTER_MIN_ROW_RATIO`를 낮추고 다시 돌린다. 그러면 건너뛴 run부터 순서대로 반영돼 버전 구간이 실제 날짜로 남는다 (2026.11.12). 변환 흐름과 달리 지연 여유를 두지 않고 방금 받은 run을 바로 처리한다. 그 결과 워터마크보다 늦게 완료된 옛 full run은 디멘션에 반영하지 않고 버린다 (다음 날 full run이 같은 정보를 다시 준다). 구현은 흐름 `eonje/load/dims.py`와 잡 `load-dims`(연결만 한다). DAG 태스크는 `trigger_rule="none_failed"`라 수집이 건너뛰어진 날에도 돌아 밀린 run을 처리하고, 수집이 실패하면 돌지 않는다. `execution_timeout` 15분, 재시도 2회 5분 간격, 드라이버 컨테이너 `mem_limit` 2g. 종료 코드는 마지막으로 본 run을 건너뛰었으면 99(Airflow skipped), 볼 run이 없거나 마지막 run을 반영했으면 0. run마다 닫은·연 버전 수를 로그에 남긴다. 실측(2026.11.12, 개발 PC): 529,300행 첫 적재 26초(충전소 101,167곳, 충전기 529,300대), 다시 돌리면 변경 0건 (2026.11.15)
 3. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
 
 전체 상태의 관측 적재와 보정(`charger_state`와 비교해 `source=reconciled` 전이)은 이 DAG에서 하지 않는다. full run도 원본 run이므로 변환 흐름(`ev_transform_10min`)이 delta run과 함께 **수집 시각 순서대로** 처리한다. 따로 돌리면 변환이 밀려 있을 때 시각 T의 전체 스냅샷이 T보다 오래된 `charger_state`와 비교되고, 그 뒤 처리되는 과거 delta가 더 새 상태와 비교돼 가짜·역방향 전이가 생긴다.
@@ -515,6 +529,8 @@ KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉
 - **카탈로그 스키마 `iceberg`는 Alembic 마이그레이션이 만들고**, 그 안의 테이블(`iceberg_tables`, `iceberg_namespace_properties`)은 Iceberg가 처음 연결될 때 만든다. Alembic은 `env.py`의 `include_name`으로 이 스키마를 비교 대상에서 뺀다
   - **`eonje` DB 전체에 `iceberg_tables`는 하나만 있어야 한다.** JDBC 카탈로그는 장부 테이블이 있는지 스키마를 지정하지 않고 확인해서, 다른 스키마(예: PoC의 `iceberg_poc`)에 같은 이름이 있으면 만들지 않고 넘어간 뒤 `iceberg` 스키마에서 찾지 못해 실패한다 (2026.11.05 개발 DB에서 확인, `iceberg_poc` 삭제로 해결). 테스트용 카탈로그가 필요하면 다른 DB에 둔다
 - **`spark-check` 잡**: 드라이버 → master → executor 계산(`range` 후 파티션을 나눠 count)과 카탈로그 조회(`SHOW NAMESPACES IN lake`)만 하고 쓰지 않는다. 개발 PC는 `make spark-check`, 운영은 배포 마지막 단계(8.3). 실패하면 Spark 쪽 인프라(네트워크, jar, 카탈로그 설정) 문제다. 원본 `s3a://` 읽기는 원본을 읽는 첫 변환 잡이 검증한다
+- **`MERGE`의 소스는 대상 테이블을 참조하지 않게 한다 (2026.11.12).** 차원 변경분은 대상 테이블을 읽어 만든 DataFrame이다. 이것을 그대로 임시 뷰로 등록해 `MERGE`의 소스로 쓰면 Spark 4.1.3 + Iceberg 1.12에서 실행 계획을 세우지 못한다 (`No plan for TableReference ... lake.core.dim_charger`. 4.1의 임시 뷰가 테이블 참조를 남겨 두는 동작과 `MERGE` 내부 서브쿼리가 맞물린 것으로 추정). `storage/lake/dims.py`의 `merge_changes`는 `localCheckpoint()`로 변경분을 먼저 계산해 고정한 뒤 뷰로 등록한다. 변경분은 한 번만 계산되고, 닫은·연 행 수도 고정된 결과에서 센다
+- **Spark 테스트 (`tests/spark`, `spark` 마커).** 레포를 마운트해 `eonje-spark` 이미지 안의 Java·pyspark로 돌린다 (`make test-spark`, 개발 PC에 Java 불필요. pytest는 볼륨 `eonje-pytest`에 한 번 설치). 세션은 `local[1]`, 시간대 `Asia/Seoul`, Iceberg는 임시 폴더의 hadoop 카탈로그 `lake`(운영의 JDBC 카탈로그·S3와 무관). `load_dims` 흐름은 원본 읽기와 워터마크 갱신을 주입받아 S3·Postgres 없이 여기서 테스트한다. CI는 spark 이미지 잡에서 같은 명령을 돌린다 (8.3)
 - **SeaweedFS + Iceberg 호환성 PoC (2026.11.03, #15의 `scripts/poc/iceberg_seaweedfs.py`, 이후 삭제): 11/11 통과.** 테이블 생성(KST 날짜 파티션), `MERGE` 키 충돌 무시와 재실행 멱등, 날짜 리터럴로 범위를 건 `MERGE`, 행을 갱신하는 `MERGE`, 동시 커밋 2개(JDBC 카탈로그가 한쪽을 거절 → Iceberg가 재시도해 둘 다 반영, 로그로 확인), 시간 여행, `rewrite_data_files`, `expire_snapshots`, 고아 파일 정리, 원본 Parquet `s3a://` 읽기, PyIceberg → DuckDB 읽기. Postgres 스키마로 전환하지 않는다
   - 고아 파일 정리: `CALL remove_orphan_files`는 24시간보다 최근 파일을 대상으로 삼지 못한다(동시 쓰기 중인 파일을 지우지 않게 하는 안전장치). 운영은 기본값(3일 이전)으로 쓴다. PoC에서는 심어 둔 파일 외에 4개가 더 지워졌다: 재시도된 동시 커밋 같은 실패한 쓰기가 남긴 파일로 보이며, 정리 작업이 실제로 필요하다는 근거다
 - 노드 간 통신 (B 추가 후): B → A는 SeaweedFS S3 8333, Postgres 5432, Spark master 7077, 모니터링 수집 대상. A → B는 Docker 데몬(학습 태스크, SSH 방식 권장), 드라이버 ↔ executor 포트. 전부 집 내부망·Tailscale에서만, 필요하면 `spark.authenticate`
@@ -537,7 +553,7 @@ KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉
 배치를 개발 PC와 같게 둔 이유: compose가 `../.env`(scheduler `env_file`)와 `../dags`를 상대 경로로 쓴다. 운영에서 `dags/`는 빈 폴더이고 DAG는 GitDagBundle로 온다.
 
 - 코드는 이미지에, DAG는 Git에, 설정 파일(`init.sh` 등)은 compose `configs:`에 넣는다
-- **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Spark 이미지 스모크(`--help`에 잡 목록, `spark-class` Master 실행), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres). PR에서만 새 push가 진행 중인 실행을 취소한다 (main 실행은 배포 도중 끊기지 않게)
+- **CI** (PR): ruff, mypy, pytest, collector 이미지 스모크(`--help`, `alembic heads`), Spark 이미지 스모크(`--help`에 잡 목록, `spark-class` Master 실행)와 그 이미지 안에서 Spark 테스트(`make test-spark`), Airflow 이미지 빌드 + DAG 무결성 검사(`docker/airflow/check_dags.py`: DB 없이 모든 DAG를 import하고 규칙·`DockerOperator._private_environment` 확인), DB 테스트(compose의 Postgres). PR에서만 새 push가 진행 중인 실행을 취소한다 (main 실행은 배포 도중 끊기지 않게)
 - **바뀐 파일에 따라 job을 고른다** (`changes` job, `dorny/paths-filter`): Python 검사는 `.py`·의존성이 바뀔 때, collector 이미지는 `eonje/`·마이그레이션·Dockerfile, Airflow 이미지는 `dags/`·`docker/airflow/`, DB 테스트는 `eonje/`·`tests/`·`infra/`가 바뀔 때만. 건너뛴 job은 통과로 친다. `ci.yml`이 바뀌면 전부 돈다
 - **배포할 것이 없으면 배포하지 않는다**: main push가 `eonje/`·`dags/`·`docker/`·`infra/`·의존성·`deploy.yml`을 건드릴 때만 이미지를 전부 빌드해 푸시하고 배포한다. 문서·테스트만 바뀐 머지는 검사만 돌고 끝난다 (배포마다 Airflow 컨테이너가 새 sha로 다시 만들어지므로 불필요한 재시작을 줄인다). 배포 job은 `publish` 성공만 본다. 조건이 없으면 기본 `success()`가 skipped된 조상 job(예: `.py` 변경이 없어 건너뛴 `check`) 때문에 배포를 건너뛴다 (2026.11.05 #18에서 발견, 그 배포는 수동 실행)
 - **이미지 푸시** (main, CI 전부 통과 후): `ghcr.io/jungyu333/eonje-collector`·`eonje-airflow`·`eonje-spark`를 `<sha>`와 `main` 태그로. 배포는 항상 sha로 고른다. 워크플로 기본 권한은 `contents: read`, 푸시 잡만 `packages: write`. 패키지는 서버가 인증 없이 pull하도록 public이어야 한다. 공개 레포에서 워크플로가 처음 푸시한 패키지는 레포를 따라 public으로 생성된다(`eonje-spark`에서 확인, 2026.11.05). private으로 생기면 Package settings에서 public으로 바꾼다
@@ -586,7 +602,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 ### 8.7 용량과 설정
 
 - 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
-- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(상태 변경분 수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게. 마스터 수집은 DAG 상수 20분), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
+- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(상태 변경분 수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게. 마스터 수집은 DAG 상수 20분), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_MASTER_MIN_ROW_RATIO=0.9`(마스터 run의 행 수가 현재 충전기 수의 이 비율보다 적으면 차원에 반영하지 않는다, 7장), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
 ## 9. 서빙 (초안)
@@ -618,7 +634,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. ~~`fetch-master` + `ev_master_daily`(수집), 수집 잡 직렬화(pool `evcharger_api`)~~ **완료(2026.11.09)**. 이어서 `load_dims`(`core.dim_*` SCD2, `ops.transform_watermark`)·`dim_date` | fetch Python, load Spark | A |
+| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. ~~`fetch-master` + `ev_master_daily`(수집), 수집 잡 직렬화(pool `evcharger_api`)~~ **완료(2026.11.09)**. ~~`load_dims`(`core.dim_station`·`dim_charger` SCD2, `transform_watermark`, `ev_master_daily`의 두 번째 태스크, pool `spark`)~~ **완료(2026.11.15)**. 이어서 `dim_date`(공휴일 출처를 정한 뒤, 12장) | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
@@ -645,6 +661,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - 변환 태스크를 한 Spark 앱으로 묶을지 (소요 시간 측정 후), 변환 DAG를 수집 DAG와 분리할지 (4단계, 7장)
 - `ops.charger_state`를 Postgres에 두는 게 맞는지 (10분 갱신 비용을 4단계에서 측정). Iceberg로 옮기면 전이 계산이 한 저장소 안에서 끝나 위 쓰기 순서 규칙이 필요 없어진다 (7장)
 - 공휴일 데이터 출처 (`dim_date`, 공공데이터포털 특일 정보 API 등)
+- Spark 앱별 자원(`spark.executor.memory`, `spark.cores.max`): 지금은 지정하지 않아 기본값으로 돈다(executor 1g, worker의 코어 전부). 차원 적재(52만 행)는 이대로 충분했다. 8.2의 3g 요청은 4단계 변환에서 측정하고 정한다
 - 대화형 SQL 조회 엔진(Trino·ClickHouse)을 B에 붙일지
 - Iceberg 시간 여행 보존 기간 (`expire_snapshots` 기준)
 

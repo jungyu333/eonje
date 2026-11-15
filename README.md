@@ -79,6 +79,9 @@ make run JOB=fetch-delta RUN_ID=manual__1 RUN_AFTER=$(date -u +%Y-%m-%dT%H:%M:%S
 
 DB 테스트는 `make up` 상태에서 `make test-db`로 돈다 (세션마다 임시 스키마를 만들고 지운다).
 
+Spark 테스트는 `make build` 뒤 `make test-spark`로 돈다. `eonje-spark` 이미지 안에서 돌아 Java를 설치하지 않아도 된다.
+일부만 돌리려면 `make test-spark ARGS="-k load_dims"`.
+
 ## Airflow로 돌려 보기
 
 `make up`은 Airflow(api-server, scheduler, dag-processor)도 함께 띄운다. 먼저 `.env`에 Airflow 값을 채운다.
@@ -97,6 +100,7 @@ make dags-check   # DAG import 오류 확인. "No data found"면 정상
 make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있으면 됨, make up 불필요)
 make spark-check  # Spark 경로 확인: executor 계산 + Iceberg 카탈로그. "catalog ok"면 정상
 make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번째부터는 "unchanged=3"
+make load-dims    # 마스터 full run을 차원 테이블에 반영. 반영하면 "applied run ...", 잘린 run뿐이면 건너뛰고 종료 코드 99
 ```
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
@@ -114,6 +118,9 @@ make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번�
 - 켜졌다면 끈다: `make dag-pause DAG=ev_status_10min`
 - 개발 PC와 운영 노드는 같은 서비스 키, 즉 같은 하루 한도를 쓰지만 호출 기록은 각자의 DB에 있어 서로의 호출을 모른다.
   운영 수집이 돌기 시작하면 개발 PC `.env`의 `EONJE_API_DAILY_LIMIT`을 작게(예: 30) 두거나 개발용 키를 따로 쓴다
+- 한도가 30이면 마스터는 9페이지에서 잘리고(전체는 53페이지) `make load-dims`는 그 run을 건너뛴다. 전체를 받아 적재까지 보려면
+  그 터미널에서만 한도를 올린다: PowerShell `$env:EONJE_API_DAILY_LIMIT = "300"` 후 `make run JOB=fetch-master ...`,
+  끝나면 `Remove-Item Env:EONJE_API_DAILY_LIMIT` (환경변수가 `.env`보다 우선한다)
 - `AIRFLOW_ADMIN_PASSWORD`를 바꾸면 `make airflow-recreate`. 비밀번호 파일 내용만 바뀐 것은 `make up`이 반영하지 않는다
 - DAG는 `dags/`가 마운트돼 있어 저장하면 바로 다시 읽힌다(이미지 재빌드 불필요). 태스크 코드(`eonje/`)를 바꾸면 `make build`
 - 이미지 안의 마이그레이션을 운영과 같은 방식으로 적용하려면 `make migrate-image`
@@ -137,7 +144,9 @@ main에 머지되면 CI가 이미지를 GHCR에 푸시하고 eonje-a에 배포�
 
 ## 상태
 
-수집기·Airflow DAG·CD까지 갖췄다. 운영 노드(eonje-a)에서 10분 수집을 시작한다.
+운영 노드(eonje-a)에서 상태 변경분(10분)과 마스터(1일 1회)를 수집하고, 마스터를 Iceberg 차원 테이블
+(`core.dim_station`·`core.dim_charger`)에 SCD2로 적재한다. 다음은 관측 → 전이 → 세션 변환이다
+([설계 §11](docs/design.md#11-구현-순서-우선순위)).
 
 ## 데이터 출처
 

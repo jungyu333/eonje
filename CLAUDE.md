@@ -19,11 +19,13 @@ eonje/        # Pure Python package. Never imports airflow.
   budget/     # Daily call budget: usage lookup, run/skip decision, page cap
   collect/    # Collection flows (budget -> paging -> raw run). Combines client/budget/storage; HTTP client,
               #   filesystem and DB session factory are injected, never built here. Returns an outcome, not an exit code.
+  load/       # Load flows: apply raw runs after the task's watermark to the DW (skip policy -> transform -> MERGE ->
+              #   watermark). The raw read and the watermark advance are injected, so flows are tested with Spark alone.
   storage/    # One subpackage per store:
-              #   postgres/ models.py (SQLAlchemy ORM), db.py (engine, staging -> ON CONFLICT), call_log.py
+              #   postgres/ models.py (SQLAlchemy ORM), db.py (engine, staging -> ON CONFLICT), call_log.py, watermark.py
               #   raw/      fs.py (S3 filesystem), paths.py, writer.py (Parquet write, collector), run.py (run + manifest)
               #   lake/     spark.py (SparkSession + Iceberg catalog, s3a read, JDBC staging write),
-              #             iceberg.py (Iceberg table definitions)
+              #             iceberg.py (Iceberg table definitions), dims.py (dimension load I/O: raw run read, MERGE)
   transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O.
   codes/      # Versioned code tables (YAML) + loader
 api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.postgres.models.
@@ -31,7 +33,8 @@ dags/         # Thin Airflow DAGs (a plain folder, no __init__.py). DockerOperat
               #   EONJE_* settings are read at execution time and passed as private_environment. GitDagBundle in prod.
 docker/       # One Dockerfile per runtime image: tasks/collector, tasks/spark, tasks/ml, api
 infra/        # compose.node-a.yaml, compose.node-b.yaml, postgres/init.sh, migrations/ (Alembic), .env.example
-tests/        # unit/ (no Airflow, no network; Spark via local session), fixtures/ (real API responses, keys removed)
+tests/        # unit/ (no Airflow, no network, no JVM), db/ (`db` marker, needs Postgres), spark/ (`spark` marker, runs
+              #   inside the eonje-spark image: transform, storage/lake, load flows), fixtures/ (real API responses, keys removed)
 docs/         # design.md, requirements.md
 ```
 
@@ -44,7 +47,8 @@ docs/         # design.md, requirements.md
   starts the old Airflow image while GitDagBundle still serves the new DAGs.
 - **External I/O lives only in `client/` and `storage/`.** `transform/` is pure: no HTTP, no DB, no filesystem.
   SparkSession creation, s3a reads, and JDBC writes belong in `storage/`.
-- **API vocabulary (`statId`, `chgerId`, `stat`, ...) is translated once in `transform/observations.py`** into internal
+- **API vocabulary (`statId`, `chgerId`, `stat`, ...) is translated once in `transform/`** (`observations.py` for status
+  deltas, `dims.py` for the master) into internal
   names (`stat_id`, `charger_id`, `status_code`). Everything downstream uses internal names only.
 - **Three stores, one role each:** raw Parquet in SeaweedFS (lake; a completed run is immutable), Iceberg `stg`/`core` on SeaweedFS
   (DW: observations, facts, SCD2 dimensions), Postgres `mart`/`ops` (serving aggregates, current state, call log,
@@ -71,6 +75,8 @@ docs/         # design.md, requirements.md
 - **Transforms keep one watermark per task** (`ops.transform_watermark`). Each task commits its own writes, then its
   own watermark; an upstream task's watermark caps what the downstream task may process. Raw runs (delta and full) are
   processed in `collected_at` order by the same flow, so reconciliation never jumps ahead of pending deltas.
+  `load_dims` skips a master run that must not be applied (empty, truncated, row count dropped) without advancing its
+  watermark; a later applied run moves the watermark past it.
 - **Cross-store writes go Iceberg first, Postgres last.** Transition derivation commits `core.evt_transition` (MERGE),
   then updates `ops.charger_state` and its watermark in one Postgres transaction. Only that task writes
   `charger_state`, under a Postgres advisory lock. Never the reverse: a failed
@@ -102,6 +108,10 @@ docs/         # design.md, requirements.md
 - Only one `iceberg_tables` may exist in the `eonje` DB (the `iceberg` schema). The JDBC catalog checks for it without a
   schema and silently skips creating it if another schema has one.
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
+- A `MERGE` source must not reference the target table. Materialize it first (`localCheckpoint`, see
+  `storage/lake/dims.py`): a temp view over a DataFrame that reads the target fails to plan on Spark 4.1.
+- Modules that import pyspark at import time (`transform/`, `load/dims.py`) are imported inside a job's `run()`, never at
+  the top of a job module: the registry imports every job and the collector image has no pyspark.
 
 ## Runtime & Deployment
 
@@ -133,6 +143,8 @@ make hooks        # pre-commit install (once per clone)
 make check        # lint + typecheck + test — same as CI
 make test ARGS="-k cli"
 make test-debug   # -x -vv -l -s, stop at first failure with locals
+make test-db      # tests that need Postgres (make up first)
+make test-spark ARGS="-k dims"   # Spark tests inside the eonje-spark image (make build first)
 make build        # build runtime images under docker/ (eonje-collector:dev)
 make run JOB=fetch-delta RUN_ID=manual__x RUN_AFTER=2026-10-28T01:10:00+00:00
 ```
