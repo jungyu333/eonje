@@ -20,6 +20,7 @@ class Settings(DatabaseSettings):
     # API
     api_service_key: SecretStr = Field(min_length=1)
     api_base_url: str = "https://apis.data.go.kr/B552584/EvCharger"
+    holiday_api_base_url: str = "https://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService"
     api_daily_limit: int = Field(default=1000, gt=0)
     page_size: int = Field(default=9999, gt=10, le=9999)
     api_timeout_sec: float = Field(default=30.0, gt=0)
