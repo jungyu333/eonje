@@ -46,5 +46,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --tb=short --strict-markers -m 'not db'"
-markers = ["db: requires a running Postgres (make up)"]
+addopts = "-ra --tb=short --strict-markers -m 'not db and not spark'"
+markers = [
+  "db: requires a running Postgres (make up)",
+  "spark: requires a JVM; runs inside the eonje-spark image (make test-spark)",
+]

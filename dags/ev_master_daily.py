@@ -4,15 +4,19 @@ import os
 from datetime import UTC, datetime, timedelta
 
 from airflow.sdk import DAG
-from eonje_airflow.operators import API_POOL, SKIPPED, EonjeTask
+from eonje_airflow.operators import API_POOL, SKIPPED, SPARK_POOL, EonjeTask
 
 # 개발 PC는 make build로 만든 eonje-collector:dev, 운영은 ghcr.io/jungyu333/eonje-collector:<sha>
 IMAGE_REPO = os.environ.get("EONJE_IMAGE_REPO", "eonje")
-IMAGE = f"{IMAGE_REPO}-collector:{os.environ.get('EONJE_IMAGE_TAG', 'dev')}"
+IMAGE_TAG = os.environ.get("EONJE_IMAGE_TAG", "dev")
+IMAGE = f"{IMAGE_REPO}-collector:{IMAGE_TAG}"
+SPARK_IMAGE = f"{IMAGE_REPO}-spark:{IMAGE_TAG}"
 NETWORK = os.environ.get("EONJE_TASK_NETWORK", "eonje_default")
 
 # 전국 마스터 약 53페이지 × 페이지당 약 8초 ≈ 7분. 재시도 여유를 두고 20분
 TIMEOUT_MIN = 20
+
+LOAD_TIMEOUT_MIN = 15
 
 with DAG(
     dag_id="ev_master_daily",
@@ -24,7 +28,7 @@ with DAG(
     max_active_runs=1,
     tags=["collect", "master"],
 ) as dag:
-    EonjeTask(
+    fetch_master = EonjeTask(
         task_id="fetch_master",
         image=IMAGE,
         command=[
@@ -44,3 +48,31 @@ with DAG(
         do_xcom_push=False,
         pool=API_POOL,
     )
+
+    load_dims = EonjeTask(
+        task_id="load_dims",
+        image=SPARK_IMAGE,
+        command=[
+            "load-dims",
+            "--run-id",
+            "{{ run_id }}",
+            "--run-after",
+            "{{ dag_run.run_after.isoformat() }}",
+        ],
+        network_mode=NETWORK,
+        mount_tmp_dir=False,
+        auto_remove="success",
+        skip_on_exit_code=SKIPPED,
+        execution_timeout=timedelta(minutes=LOAD_TIMEOUT_MIN),
+        retries=2,
+        retry_delay=timedelta(minutes=5),
+        do_xcom_push=False,
+        pool=SPARK_POOL,
+        # 드라이버 컨테이너의 상한. JVM 힙(기본 1g) + 파이썬 프로세스
+        mem_limit="2g",
+        # 워터마크 태스크라 수집이 건너뛰어져도 돌아 밀린 run을 처리한다.
+        # 수집이 실패했으면 돌지 않는다
+        trigger_rule="none_failed",
+    )
+
+    fetch_master >> load_dims

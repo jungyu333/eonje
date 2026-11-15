@@ -13,6 +13,7 @@ SKIPPED = 99  # eonje.cli.exit_codes.SKIPPED (예산 소진, 늦은 run)
 # airflow-init이 만든다.
 # 이 모듈은 이름을 지우거나 바꾸지 않고 추가만 한다 (옛 sha로 롤백할 때 DAG가 깨지지 않게)
 API_POOL = "evcharger_api"
+SPARK_POOL = "spark"
 
 # compose·Airflow 쪽에서만 쓰는 값. 태스크 컨테이너에는 넘기지 않는다
 _NOT_FOR_TASKS = {

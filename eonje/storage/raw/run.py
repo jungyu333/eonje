@@ -16,7 +16,7 @@ from fsspec import AbstractFileSystem
 
 from eonje.client.paging import page_count
 from eonje.client.types import Page
-from eonje.storage.raw.paths import RawRun, manifest_path, partition_date, run_prefix
+from eonje.storage.raw.paths import Dataset, RawRun, manifest_path, partition_date, run_prefix
 from eonje.storage.raw.writer import write_page
 from eonje.timeutil import require_aware
 
@@ -51,6 +51,11 @@ class RunManifest:
         if self.truncated:
             return None
         return self.total_count - self.row_count
+
+    @property
+    def collected(self) -> datetime:
+        """collected_at을 시간대가 있는 datetime으로."""
+        return datetime.fromisoformat(self.collected_at)
 
 
 class RawRunWriter:
@@ -138,12 +143,27 @@ def read_manifest(fs: AbstractFileSystem, bucket: str, run: RawRun) -> RunManife
     path = manifest_path(bucket, run)
     if not fs.exists(path):
         return None
+    return _load_manifest(fs, path)
+
+
+def list_manifests(fs: AbstractFileSystem, bucket: str, dataset: Dataset) -> list[RunManifest]:
+    """데이터셋의 완료된 run 전부를 (collected_at, run_key) 오름차순으로 돌려준다.
+
+    manifest가 없는 run(수집 중, 중간 실패)은 나오지 않는다. 날짜 폴더를 전부 훑으므로
+    하루 1번 쌓이는 마스터용이다. 10분마다 쌓이는 상태 변경분은 날짜 범위를 받게 고쳐 쓴다 (4단계).
+    """
+    paths = fs.glob(f"{bucket}/{dataset}/dt=*/run=*/_manifest.json")
+    manifests = [_load_manifest(fs, path) for path in paths]
+    return sorted(manifests, key=lambda m: (m.collected, m.run_key))
+
+
+def _load_manifest(fs: AbstractFileSystem, path: str) -> RunManifest:
     data = json.loads(fs.cat_file(path))
     if data.get("version") != MANIFEST_VERSION:
         raise ValueError(f"unsupported manifest version: {data.get('version')!r} at {path}")
     missing = [f.name for f in fields(RunManifest) if f.name not in data]
+
     if missing:
-        # version 1은 배포 전이라 필드를 늘려도 버전을 올리지 않았다.
-        # 그 전에 쓴 로컬 manifest가 여기 걸린다
         raise ValueError(f"manifest at {path} is missing fields {missing}")
+
     return RunManifest(**{f.name: data[f.name] for f in fields(RunManifest)})

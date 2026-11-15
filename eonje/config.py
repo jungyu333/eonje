@@ -34,6 +34,9 @@ class Settings(DatabaseSettings):
     # API 창(최근 status_period_min분)보다 클 수 없다. 크면 창이 덮지 못하는 run까지 받는다
     fetch_max_lag_min: int | None = Field(default=None, ge=1)
     master_max_lag_min: int = Field(default=60, ge=1)
+    # 마스터 run의 행 수가 지금 차원의 충전기 수의 이 비율보다 작으면 차원에 반영하지 않는다.
+    # 일부만 받은 run이 나머지를 없어진 것으로 기록하지 않게 한다
+    master_min_row_ratio: float = Field(default=0.9, gt=0, le=1)
     serve_zcodes: list[str] = Field(default_factory=list)
 
     # 저장
