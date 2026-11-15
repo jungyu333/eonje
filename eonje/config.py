@@ -39,6 +39,8 @@ class Settings(DatabaseSettings):
     # 일부만 받은 run이 나머지를 없어진 것으로 기록하지 않게 한다
     master_min_row_ratio: float = Field(default=0.9, gt=0, le=1)
     serve_zcodes: list[str] = Field(default_factory=list)
+    # dim_date가 시작하는 해. 서비스 데이터가 쌓이기 시작한 해다
+    dim_date_first_year: int = Field(default=2026, ge=2000, le=2100)
 
     # 저장
     raw_bucket: str = Field(default="eonje-raw", pattern=_BUCKET_PATTERN)
