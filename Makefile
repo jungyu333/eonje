@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check test-spark load-dims
+.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check test-spark load-dims load-dim-date
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -99,6 +99,9 @@ ensure-iceberg-tables:  ## Iceberg 테이블 생성·컬럼 추가 (make build, 
 
 load-dims:       ## 마스터 full run을 차원 테이블에 반영 (make build, make ensure-iceberg-tables 후)
 	$(COMPOSE) run --rm -T load-dims < /dev/null
+
+load-dim-date:   ## 공휴일을 받아 날짜 차원(core.dim_date)을 맞춘다 (make build, make ensure-iceberg-tables 후)
+	$(COMPOSE) run --rm -T load-dim-date < /dev/null
 
 # 레포를 마운트해 이미지 안의 Java·pyspark로 돌린다 (Windows에 Java가 필요 없다).
 # pytest는 이미지에 없어서 볼륨(eonje-pytest)에 한 번만 설치해 둔다.

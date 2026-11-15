@@ -16,17 +16,20 @@ eonje/        # Pure Python package. Never imports airflow.
               #   app.py (parse, dispatch, exit code) · registry.py (name -> job) · jobs/ (one module per DAG task, wiring only)
   config.py   # Settings (pydantic-settings, EONJE_ prefix). The only place env vars are read.
   client/     # API client: request building, pagination, retry, response validation
+              #   holidays.py is a separate API (public holidays for dim_date), not part of the EvCharger budget.
   budget/     # Daily call budget: usage lookup, run/skip decision, page cap
   collect/    # Collection flows (budget -> paging -> raw run). Combines client/budget/storage; HTTP client,
               #   filesystem and DB session factory are injected, never built here. Returns an outcome, not an exit code.
   load/       # Load flows: apply raw runs after the task's watermark to the DW (skip policy -> transform -> MERGE ->
               #   watermark). The raw read and the watermark advance are injected, so flows are tested with Spark alone.
+              #   dates.py rebuilds dim_date (holiday fetch -> date rows) and overwrites it only when it changed.
   storage/    # One subpackage per store:
               #   postgres/ models.py (SQLAlchemy ORM), db.py (engine, staging -> ON CONFLICT), call_log.py, watermark.py
               #   raw/      fs.py (S3 filesystem), paths.py, writer.py (Parquet write, collector), run.py (run + manifest)
               #   lake/     spark.py (SparkSession + Iceberg catalog, s3a read, JDBC staging write),
-              #             iceberg.py (Iceberg table definitions), dims.py (dimension load I/O: raw run read, MERGE)
-  transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O.
+              #             iceberg.py (Iceberg table definitions), dims.py (dimension load I/O: raw run read, MERGE),
+              #             dates.py (dim_date read, whole-table overwrite)
+  transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O. (dates.py is plain Python, no Spark.)
   codes/      # Versioned code tables (YAML) + loader
 api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.postgres.models.
 dags/         # Thin Airflow DAGs (a plain folder, no __init__.py). DockerOperator running eonje.cli in a runtime image;
@@ -57,7 +60,7 @@ docs/         # design.md, requirements.md
   models). Iceberg: `storage/lake/iceberg.py`, applied by an idempotent job (`CREATE TABLE IF NOT EXISTS`, add missing
   columns) — never Alembic. Alembic ignores the `iceberg` catalog schema.
 - **Bulk loads never use `session.add` per row.** Postgres: Spark writes a JDBC staging table, then
-  `INSERT ... ON CONFLICT`. Iceberg: `MERGE INTO` for every keyed table except small static ones rewritten whole (`dim_date`) (`WHEN NOT MATCHED INSERT` for
+  `INSERT ... ON CONFLICT`. Iceberg: `MERGE INTO` for every keyed table except small ones rewritten whole (`dim_date`, only when its content changed) (`WHEN NOT MATCHED INSERT` for
   ignore-on-conflict) — never plain `append`, which duplicates rows on rerun because Iceberg has no unique constraints.
 - **Raw responses are stored as received** — all columns as strings, unknown fields kept. Type conversion happens in
   `transform/`.
@@ -88,7 +91,8 @@ docs/         # design.md, requirements.md
 - Unknown status codes are stored, never rejected. Do not hardcode status enums; map at aggregation time via `codes/`.
 - Missing observation windows are "unknown", not "available". They never enter an occupancy denominator.
 - The daily API limit (`EONJE_API_DAILY_LIMIT`) must never be exceeded. Every call is logged to `api_call_log`;
-  `budget/` decides before any fetch.
+  `budget/` decides before any fetch. This covers the EvCharger API only: holiday API calls (`client/holidays.py`) are
+  not logged there, because every row in that table counts against the EvCharger budget.
 
 ## Spark Rules
 
@@ -110,8 +114,10 @@ docs/         # design.md, requirements.md
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
 - A `MERGE` source must not reference the target table. Materialize it first (`localCheckpoint`, see
   `storage/lake/dims.py`): a temp view over a DataFrame that reads the target fails to plan on Spark 4.1.
-- Modules that import pyspark at import time (`transform/`, `load/dims.py`) are imported inside a job's `run()`, never at
-  the top of a job module: the registry imports every job and the collector image has no pyspark.
+- Modules that import pyspark at import time (`transform/dims.py`, `load/dims.py`) are imported inside a job's `run()`,
+  never at the top of a job module: the registry imports every job and the collector image has no pyspark.
+  Modules that are plain Python or import pyspark only inside functions (`transform/dates.py`, `load/dates.py`,
+  `storage/lake/`) are imported at the top, as `cli/jobs/load_dim_date.py` does.
 
 ## Runtime & Deployment
 

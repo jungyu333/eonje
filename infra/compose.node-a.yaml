@@ -197,6 +197,29 @@ services:
       spark-worker:
         condition: service_started
 
+  # 날짜 차원 채우기 (load-dim-date 잡). 공휴일을 특일 정보 API에서 받아 core.dim_date를 맞춘다
+  # 운영에서는 ev_master_daily가 같은 잡을 돌린다. run_after의 KST 날짜를 오늘로 본다
+  load-dim-date:
+    image: ${EONJE_IMAGE_REPO:-eonje}-spark:${EONJE_IMAGE_TAG:-dev}
+    profiles: [ "tools" ]
+    env_file: ../.env
+    environment:
+      EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD:?set EONJE_DB_PASSWORD in .env}@postgres:5432/eonje
+      EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_SPARK_MASTER: spark://spark-master:7077
+    entrypoint: [ "sh", "-c" ]
+    command:
+      - exec python -m eonje.cli load-dim-date --run-id load-dim-date --run-after "$$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+
   airflow-init:
     <<: *airflow
     restart: "no"
