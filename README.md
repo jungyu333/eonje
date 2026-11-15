@@ -27,6 +27,7 @@
 ## 로컬에서 수집 돌려 보기
 
 필요한 것: [uv](https://docs.astral.sh/uv/), Docker, 공공데이터포털 EvCharger API 서비스 키.
+날짜 차원(`make load-dim-date`)까지 돌리려면 같은 계정으로 "한국천문연구원_특일 정보"도 활용신청한다 (키는 같다).
 
 **1. 설정**
 
@@ -101,6 +102,7 @@ make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있�
 make spark-check  # Spark 경로 확인: executor 계산 + Iceberg 카탈로그. "catalog ok"면 정상
 make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번째부터는 "unchanged=3"
 make load-dims    # 마스터 full run을 차원 테이블에 반영. 반영하면 "applied run ...", 잘린 run뿐이면 건너뛰고 종료 코드 99
+make load-dim-date  # 공휴일을 받아 날짜 차원을 맞춘다. 처음엔 "dim_date updated", 다시 돌리면 "dim_date unchanged"
 ```
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
@@ -145,7 +147,8 @@ main에 머지되면 CI가 이미지를 GHCR에 푸시하고 eonje-a에 배포�
 ## 상태
 
 운영 노드(eonje-a)에서 상태 변경분(10분)과 마스터(1일 1회)를 수집하고, 마스터를 Iceberg 차원 테이블
-(`core.dim_station`·`core.dim_charger`)에 SCD2로 적재한다. 다음은 관측 → 전이 → 세션 변환이다
+(`core.dim_station`·`core.dim_charger`)에 SCD2로 적재한다. 날짜 차원(`core.dim_date`)은 공휴일과 함께
+매일 맞춘다. 다음은 관측 → 전이 → 세션 변환이다
 ([설계 §11](docs/design.md#11-구현-순서-우선순위)).
 
 ## 데이터 출처

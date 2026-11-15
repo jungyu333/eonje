@@ -103,11 +103,13 @@ eonje/
       jobs/               # job 하나 = 모듈 하나 = DAG 태스크 하나. 의존성 생성과 결과 → 종료 코드 변환만, 로직 없음
     config.py             # 설정값 (한도·간격·지역·페이지 크기·Spark master 등). EONJE_ 환경변수·.env에서 로드
     client/               # API 클라이언트: 요청 조립, 페이지네이션, 재시도, 응답 검증
+      holidays.py         # 특일 정보 API(공휴일) 클라이언트. EvCharger와 별개의 API라 호출 로그·예산에 넣지 않는다
     budget/               # 호출 예산: 오늘 사용량 조회, 실행 가능 여부·페이지 상한 판단
     collect/              # 수집 흐름: 완료·지연 확인 → 예산 판단 → 페이지 순회 → 원본 run 쓰기. client·budget·storage를 조합하고, HTTP·파일시스템·DB 세션은 주입받는다
     load/                 # 적재 흐름: 워터마크 뒤의 원본 run을 DW에 반영 (건너뛸 run 판단 → 변환 → MERGE → 워터마크). 원본 읽기와 워터마크 갱신은 주입받는다
       policy.py           # full run을 반영해도 되는지 판단 (0건·잘림·행 수 급감). 순수 함수
       dims.py             # 마스터 full run → dim_station·dim_charger (SCD2)
+      dates.py            # dim_date 채우기: 공휴일 조회 → 날짜 행 → 지금 테이블과 다를 때만 전체 덮어쓰기
     storage/              # 저장소마다 하위 패키지 하나 (2026.11.05 정리)
       postgres/
         models.py         # SQLAlchemy ORM 모델 (Postgres 스키마 mart·ops의 단일 출처. Alembic autogenerate 대상)
@@ -123,8 +125,10 @@ eonje/
         spark.py          # SparkSession 생성(설정·Iceberg 카탈로그 주입), s3a 읽기, JDBC 스테이징 쓰기
         iceberg.py        # Iceberg 테이블 정의(스키마·파티션)의 단일 출처. 멱등한 생성·컬럼 추가로 적용 (3단계)
         dims.py           # 차원 적재의 읽기·쓰기: 원본 run 읽기(s3a), 현재 버전 수, 변경분 MERGE
+        dates.py          # dim_date 읽기와 전체 덮어쓰기
     transform/            # 순수 함수. Spark DataFrame in → DataFrame out. I/O 없음
       dims.py             # 마스터 필드 → 차원 행(충전소·충전기: 내부 어휘, 타입, row_hash), SCD2 비교·갱신 행 생성
+      dates.py            # 기간 + 공휴일 → dim_date 행 (요일·주말·공휴일). Spark를 쓰지 않는 순수 파이썬
       observations.py     # API 어휘 → 내부 어휘, 타입 변환, run 안 중복 제거 (observed_at = run의 collected_at)
       transitions.py      # charger_state와 비교 → 전이 이벤트
       sessions.py         # last_ts/last_te/now_ts → 세션 upsert 행
@@ -319,6 +323,19 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 
 `kind`/`kindDetail`(시설 유형 10/70여 종), `zcode`/`zscode`(시도/시군구), `busiId`(운영기관 140여), `chgerType`(11종, NACS 포함), `output`(kW), `method`(단독/동시), `limitYn`/`limitDetail`, `parkingFree`, `useTime`, `year`(설치년도), `floorType`/`floorNum`, `delYn`/`delDetail`(철거 이력), `maker`.
 
+### 공휴일: 특일 정보 API (2026.11.15)
+
+한국천문연구원 "특일 정보" OpenAPI (공공데이터포털, 서비스 `B090041/openapi/service/SpcdeInfoService`). `core.dim_date`의 공휴일 출처다. EvCharger와 같은 계정의 서비스 키를 쓰고, 활용신청은 API마다 따로 한다.
+
+- 오퍼레이션 `getRestDeInfo`(공휴일 정보). 파라미터 `serviceKey`, `solYear`, `numOfRows`, `pageNo`, `_type=json`. `solMonth`를 빼면 한 해 전체가 한 번에 온다 (2026년 22건)
+- 응답은 `response.header.resultCode`, `response.body.items.item[]`, `totalCount`로 EvCharger와 모양이 다르다. 항목은 `locdate`(숫자 `20260101`), `dateName`, `isHoliday`(Y/N), `dateKind`, `seq`
+- 대체공휴일(`대체공휴일(삼일절)`)과 선거일(`전국동시지방선거`)이 들어 있다. 어떤 날이 공휴일인지는 코드에 규칙으로 두지 않고 `isHoliday`만 따른다
+- `seq`가 2인 항목이 있다 (같은 날짜의 다른 특일과의 순번으로 보인다). 같은 날짜에 공휴일 항목이 둘 이상 오면 `seq` 순으로 이름을 잇는다 (2026년 응답에는 그런 날짜가 없어 실제 응답으로 확인하지는 못했다)
+- 다음 해 공휴일은 미리 발표된다 (2026.11.15에 2027년 조회 가능)
+- 지난 연도도 다시 받을 수 있어 원본을 따로 저장하지 않는다. 호출도 `api_call_log`에 남기지 않는다 (그 테이블의 행 수가 EvCharger 하루 한도 계산이다)
+- 확인하지 못한 것: 하루 호출 한도(하루에 몇 번만 부른다), 0건·1건일 때의 응답 모양(파서는 빈 값과 객체 하나를 모두 받는다)
+- 다른 후보였던 파이썬 `holidays` 패키지와 CSV 직접 관리는 임시공휴일 반영이 사람 손에 달려 있어 택하지 않았다
+
 ## 5. 수집 전략
 
 호출 한도가 설계를 결정한다. 한도·간격·지역은 전부 설정값이고, 운영계정 전환 시 설정만 바꾼다.
@@ -393,7 +410,7 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 | `core.fact_session` | 충전 세션 1회 | `stat_id, charger_id, started_at` | `MERGE` (진행 중 세션이 끝나면 갱신) | `started_date` | `ended_at`, `duration_min`, `source`(last_ts/now_ts) |
 | `core.dim_station` | 충전소 1곳의 한 버전 | `stat_id, valid_from` | SCD2, 하루 1번 (`MERGE`: 바뀐 행은 현재 버전을 닫고 새 버전 추가) | 없음 | 이름·주소·좌표·시설 유형·지역·운영기관·이용시간·주차료·이용제한·교통약자 표시, `valid_to`, `is_current`, `row_hash`(속성 해시, 바뀐 행 판단), `source_run_key`(이 버전을 만든 full run) |
 | `core.dim_charger` | 충전기 1대의 한 버전 | `stat_id, charger_id, valid_from` | SCD2, 하루 1번 (`MERGE`) | 없음 | 타입·출력·방식·전원 유형·제조사·설치년도·층·삭제 여부, `valid_to`, `is_current`, `row_hash`, `source_run_key` |
-| `core.dim_date` | 날짜 1일 | `date` | 정적. 공휴일이 바뀌면 테이블 전체 덮어쓰기 (작은 정적 테이블이라 `MERGE` 규칙의 예외) | 없음 | 요일, 주말, 공휴일 |
+| `core.dim_date` | 날짜 1일 | `date` | 하루 1번 다시 만들어 지금 테이블과 다를 때만 전체 덮어쓰기 (작은 테이블이라 `MERGE` 규칙의 예외) | 없음 | `year`·`month`·`day`, `day_of_week`(ISO, 1=월), `is_weekend`, `is_holiday`, `holiday_name` |
 
 - 팩트는 **추가만** 한다. 고칠 일은 새 행으로 남긴다 (보정 전이). 예외는 세션 종료 갱신 하나
 - **키가 있는 테이블은 단순 `append`로 쓰지 않는다.** Iceberg에는 고유 제약이 없어 재실행하면 중복 행이 생긴다. 키 충돌 무시는 `MERGE ... WHEN NOT MATCHED INSERT`로 구현한다. 단순 `append`는 키가 없는 테이블에만
@@ -406,6 +423,11 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - 값 정리: 앞뒤 공백(탭·전각 공백 포함)을 지우고 빈 값은 NULL, 숫자는 `try_cast`(숫자가 아니면 NULL). `row_hash`는 원문이 아니라 이렇게 정리·변환한 저장값으로 계산한다 (원문으로 계산하면 `"050"`과 `"50"`이 저장값은 같은데 다른 버전이 된다)
   - 키당 한 행: 충전소 속성은 충전기 행마다 반복되므로 `chgerId`가 가장 작은 행의 값을 쓴다. 같은 충전기가 두 번 나오면(페이징 드리프트) 나중 페이지의 행을 쓴다. 키가 빈 행은 버린다
   - 반영은 테이블마다 `MERGE` 한 번(Iceberg 커밋 하나): `(키, valid_from)`이 같으면 `valid_to`·`is_current`만 갱신하고, 없으면 추가한다. 두 차원은 서로 다른 커밋이라 사이에 실패하면 다시 돌려 맞춘다 (변경분을 현재 테이블에서 다시 계산하므로 결과가 같다)
+- **날짜 차원 규칙 (`load/dates.py`, 2026.11.15).** `EONJE_DIM_DATE_FIRST_YEAR`(2026)의 1월 1일부터 공휴일이 발표된 마지막 해의 12월 31일까지 하루 한 행
+  - 요일·주말은 계산하고 공휴일은 특일 정보 API의 `isHoliday`를 따른다 (4장). `is_holiday`는 공휴일 목록에 있는 날만 참이고 보통의 토·일은 거짓이다. 쉬는 날은 `is_weekend OR is_holiday`로 판단한다
+  - 해마다 한 번씩 조회한다 (첫 해 ~ 내년). 올해까지의 해에 공휴일이 0건이면 응답이 잘못된 것으로 보고 실패하고 테이블은 그대로 둔다. 내년은 발표됐을 때만 넣는다
+  - 새로 만든 행을 지금 테이블과 날짜별로 비교해 **다를 때만** `INSERT OVERWRITE`로 전체를 바꾼다 (커밋 하나). 같으면 쓰지 않아 스냅샷이 쌓이지 않고, 바뀐 날짜(임시공휴일 등)는 로그에 남는다
+  - 쓰이는 곳: 집계에서 요일을 붙이고 공휴일을 평일 패턴에서 빼거나 따로 묶는다(6단계). 예측의 입력(9단계). 지금은 읽는 곳이 없다
 - 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
 
 ### 서빙·운영 (Postgres `eonje` DB, `storage/postgres/models.py`)
@@ -442,6 +464,7 @@ KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉
 1. `fetch_master` (C, pool `evcharger_api`. 상태 변경분은 이 pool에 넣지 않으므로 마스터가 도는 동안에도 delta는 제때 돈다) — 53페이지 순회, 원본 `charger_info` 저장. 페이지 단위 재시도, 호출 로그 기록. `execution_timeout` 20분(약 7분 소요), 재시도 2회 5분 간격(지연 허용치 60분 안에 든다). **0건이거나 예산으로 잘린 run(`truncated`)도 원본과 manifest는 그대로 남긴다** (API가 실제로 준 것을 남기는 원칙). 차원에 반영할지는 `load_dims`가 정한다 (2026.11.09)
 2. `load_dims` (S) — 미처리 full run을 `collected_at` 순서대로 `core.dim_station`·`dim_charger`에 SCD2 반영 (바뀐 행만 새 버전, `valid_from` = run의 `collected_at`). 워터마크 태스크다 (`ops.transform_watermark`): 처리한 run보다 이른 run은 다시 반영하지 않으므로, 늦게 재실행된 옛 run이 현재 버전을 닫아 구간이 뒤집히지 않는다. `getChargerInfo`도 지금 상태만 주므로 마스터 수집에도 같은 재실행·지연 규칙(6장)을 적용한다. **반영하지 않는 full run**: 0건, 예산으로 잘린 run(`truncated`), 행 수가 지금 차원의 현재 충전기 수 × `EONJE_MASTER_MIN_ROW_RATIO`(기본 0.9)보다 적은 run(차원이 비어 있는 첫 적재는 비교하지 않는다). 이런 run을 반영하면 받지 못한 충전소가 철거된 것처럼 현재 버전이 닫힌다. 건너뛴 run은 경고를 남기고 **워터마크를 올리지 않는다**. 뒤에 온 run이 반영되면 워터마크가 그 run까지 넘어가고, 그때까지는 `load_dims`가 돌 때마다 다시 판정한다. 행 수 급감이 실제 변화라면 이후 run도 계속 건너뛰므로, 사람이 확인한 뒤 `EONJE_MASTER_MIN_ROW_RATIO`를 낮추고 다시 돌린다. 그러면 건너뛴 run부터 순서대로 반영돼 버전 구간이 실제 날짜로 남는다 (2026.11.12). 변환 흐름과 달리 지연 여유를 두지 않고 방금 받은 run을 바로 처리한다. 그 결과 워터마크보다 늦게 완료된 옛 full run은 디멘션에 반영하지 않고 버린다 (다음 날 full run이 같은 정보를 다시 준다). 구현은 흐름 `eonje/load/dims.py`와 잡 `load-dims`(연결만 한다). DAG 태스크는 `trigger_rule="none_failed"`라 수집이 건너뛰어진 날에도 돌아 밀린 run을 처리하고, 수집이 실패하면 돌지 않는다. `execution_timeout` 15분, 재시도 2회 5분 간격, 드라이버 컨테이너 `mem_limit` 2g. 종료 코드는 마지막으로 본 run을 건너뛰었으면 99(Airflow skipped), 볼 run이 없거나 마지막 run을 반영했으면 0. run마다 닫은·연 버전 수를 로그에 남긴다. 실측(2026.11.12, 개발 PC): 529,300행 첫 적재 26초(충전소 101,167곳, 충전기 529,300대), 다시 돌리면 변경 0건 (2026.11.15)
 3. `refresh_codes` (C) — 응답에서 본 미지 코드 보고
+4. `load_dim_date` (S, pool `spark`) — 특일 정보 API에서 공휴일을 받아 `core.dim_date`를 맞춘다 (6장, 잡 `load-dim-date`). 상류가 없는 독립 태스크라 특일 API가 실패해도 수집과 차원 적재는 돈다. `execution_timeout` 10분, 재시도 2회 5분 간격, 드라이버 `mem_limit` 2g. 평소에는 `dim_date unchanged`로 끝난다. 실측(2026.11.15, 개발 PC): 730행(2026~2027) 첫 적재가 Spark 기동을 포함해 10초 안쪽, 다시 돌리면 쓰지 않음
 
 전체 상태의 관측 적재와 보정(`charger_state`와 비교해 `source=reconciled` 전이)은 이 DAG에서 하지 않는다. full run도 원본 run이므로 변환 흐름(`ev_transform_10min`)이 delta run과 함께 **수집 시각 순서대로** 처리한다. 따로 돌리면 변환이 밀려 있을 때 시각 T의 전체 스냅샷이 T보다 오래된 `charger_state`와 비교되고, 그 뒤 처리되는 과거 delta가 더 새 상태와 비교돼 가짜·역방향 전이가 생긴다.
 
@@ -602,7 +625,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 ### 8.7 용량과 설정
 
 - 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
-- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(상태 변경분 수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게. 마스터 수집은 DAG 상수 20분), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_MASTER_MIN_ROW_RATIO=0.9`(마스터 run의 행 수가 현재 충전기 수의 이 비율보다 적으면 차원에 반영하지 않는다, 7장), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
+- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(상태 변경분 수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게. 마스터 수집은 DAG 상수 20분), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_MASTER_MIN_ROW_RATIO=0.9`(마스터 run의 행 수가 현재 충전기 수의 이 비율보다 적으면 차원에 반영하지 않는다, 7장), `EONJE_DIM_DATE_FIRST_YEAR=2026`(날짜 차원이 시작하는 해), `EONJE_HOLIDAY_API_BASE_URL`(특일 정보 API, 4장), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
 ## 9. 서빙 (초안)
@@ -634,7 +657,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 |---|---|---|---|
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
-| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. ~~`fetch-master` + `ev_master_daily`(수집), 수집 잡 직렬화(pool `evcharger_api`)~~ **완료(2026.11.09)**. ~~`load_dims`(`core.dim_station`·`dim_charger` SCD2, `transform_watermark`, `ev_master_daily`의 두 번째 태스크, pool `spark`)~~ **완료(2026.11.15)**. 이어서 `dim_date`(공휴일 출처를 정한 뒤, 12장) | fetch Python, load Spark | A |
+| 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. ~~`fetch-master` + `ev_master_daily`(수집), 수집 잡 직렬화(pool `evcharger_api`)~~ **완료(2026.11.09)**. ~~`load_dims`(`core.dim_station`·`dim_charger` SCD2, `transform_watermark`, `ev_master_daily`의 두 번째 태스크, pool `spark`)~~ **완료(2026.11.15)**. ~~`dim_date`(공휴일은 특일 정보 API, 잡 `load-dim-date`, `ev_master_daily`의 독립 태스크)~~ **완료(2026.11.15)** | fetch Python, load Spark | A |
 | 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
@@ -660,7 +683,6 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
 - 변환 태스크를 한 Spark 앱으로 묶을지 (소요 시간 측정 후), 변환 DAG를 수집 DAG와 분리할지 (4단계, 7장)
 - `ops.charger_state`를 Postgres에 두는 게 맞는지 (10분 갱신 비용을 4단계에서 측정). Iceberg로 옮기면 전이 계산이 한 저장소 안에서 끝나 위 쓰기 순서 규칙이 필요 없어진다 (7장)
-- 공휴일 데이터 출처 (`dim_date`, 공공데이터포털 특일 정보 API 등)
 - Spark 앱별 자원(`spark.executor.memory`, `spark.cores.max`): 지금은 지정하지 않아 기본값으로 돈다(executor 1g, worker의 코어 전부). 차원 적재(52만 행)는 이대로 충분했다. 8.2의 3g 요청은 4단계 변환에서 측정하고 정한다
 - 대화형 SQL 조회 엔진(Trino·ClickHouse)을 B에 붙일지
 - Iceberg 시간 여행 보존 기간 (`expire_snapshots` 기준)
