@@ -17,6 +17,8 @@ NETWORK = os.environ.get("EONJE_TASK_NETWORK", "eonje_default")
 TIMEOUT_MIN = 20
 
 LOAD_TIMEOUT_MIN = 15
+# 날짜 차원은 API 호출 몇 번과 천 행 안팎의 쓰기라 1분 안쪽이다
+DATE_TIMEOUT_MIN = 10
 
 with DAG(
     dag_id="ev_master_daily",
@@ -76,3 +78,27 @@ with DAG(
     )
 
     fetch_master >> load_dims
+
+    # 날짜 차원은 마스터와 무관해서 다른 태스크와 묶지 않는다.
+    # 특일 정보 API가 실패해도 수집과 차원 적재는 그대로 돈다
+    EonjeTask(
+        task_id="load_dim_date",
+        image=SPARK_IMAGE,
+        command=[
+            "load-dim-date",
+            "--run-id",
+            "{{ run_id }}",
+            "--run-after",
+            "{{ dag_run.run_after.isoformat() }}",
+        ],
+        network_mode=NETWORK,
+        mount_tmp_dir=False,
+        auto_remove="success",
+        skip_on_exit_code=SKIPPED,
+        execution_timeout=timedelta(minutes=DATE_TIMEOUT_MIN),
+        retries=2,
+        retry_delay=timedelta(minutes=5),
+        do_xcom_push=False,
+        pool=SPARK_POOL,
+        mem_limit="2g",
+    )
