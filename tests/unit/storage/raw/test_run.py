@@ -804,6 +804,130 @@ def test_list_manifests_returns_only_runs_of_the_requested_dataset(
     assert listed == [finished[dataset]]
 
 
+# --- list_manifests(since=...) --------------------------------------------------------
+
+
+def _finished_on_three_dates(
+    fs: MemoryFileSystem, items: list[dict[str, Any]]
+) -> dict[date, RunManifest]:
+    """One completed status run per KST date 2026-10-24, 25, 26 (10:00 KST each)."""
+    finished = {}
+    for day in (24, 25, 26):
+        at = datetime(2026, 10, day, 10, 0, tzinfo=KST)
+        r = RawRun(
+            dataset=Dataset.CHARGER_STATUS,
+            dt=partition_date(at),
+            run_key=f"scheduled__2026-10-{day}T01-00-00",
+        )
+        finished[r.dt] = _finished(fs, r, at, items)
+    return finished
+
+
+def test_list_manifests_without_since_returns_runs_of_every_date(
+    mem_fs: MemoryFileSystem, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN completed runs on three KST dates
+    finished = _finished_on_three_dates(mem_fs, status_items)
+
+    # WHEN the dataset is listed without since
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS)
+
+    # THEN every run appears, oldest first
+    assert listed == [finished[d] for d in sorted(finished)]
+
+
+def test_list_manifests_with_since_returns_runs_on_or_after_that_date(
+    mem_fs: MemoryFileSystem, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN completed runs on 2026-10-24, 25 and 26
+    finished = _finished_on_three_dates(mem_fs, status_items)
+
+    # WHEN the dataset is listed since 2026-10-25
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS, since=date(2026, 10, 25))
+
+    # THEN the run of that same date and the later one appear, the earlier one does not
+    assert listed == [finished[date(2026, 10, 25)], finished[date(2026, 10, 26)]]
+
+
+def test_list_manifests_with_since_after_every_date_is_an_empty_list(
+    mem_fs: MemoryFileSystem, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN completed runs up to 2026-10-26
+    _finished_on_three_dates(mem_fs, status_items)
+
+    # WHEN the dataset is listed since the following day
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS, since=date(2026, 10, 27))
+
+    # THEN nothing is returned
+    assert listed == []
+
+
+def test_list_manifests_with_since_still_skips_runs_without_a_manifest(
+    mem_fs: MemoryFileSystem, status_items: list[dict[str, Any]]
+) -> None:
+    # GIVEN a completed run on 2026-10-26
+    at = datetime(2026, 10, 26, 10, 0, tzinfo=KST)
+    done = RawRun(dataset=Dataset.CHARGER_STATUS, dt=date(2026, 10, 26), run_key="done")
+    completed = _finished(mem_fs, done, at, status_items)
+    # AND a later run on the same date that wrote a page but never finished
+    unfinished = RawRun(dataset=Dataset.CHARGER_STATUS, dt=date(2026, 10, 26), run_key="partial")
+    writer = _started(mem_fs, unfinished, collected_at=at + timedelta(minutes=10))
+    writer.write(_page(status_items))
+
+    # WHEN the dataset is listed since that date
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS, since=date(2026, 10, 26))
+
+    # THEN only the completed run appears
+    assert listed == [completed]
+
+
+def test_list_manifests_with_since_orders_runs_by_collected_at_then_run_key(
+    mem_fs: MemoryFileSystem,
+    status_items: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GIVEN completed runs after since on two KST dates, whose run_keys sort differently
+    # from their collection times, plus a delta and a full run sharing one collected_at
+    runs = [
+        ("manual__2026-10-26T12-00-00", datetime(2026, 10, 26, 21, 0, tzinfo=KST)),
+        ("scheduled__2026-10-25T10-00-00", datetime(2026, 10, 25, 19, 0, tzinfo=KST)),
+        ("full__20261026T101000", datetime(2026, 10, 26, 19, 10, tzinfo=KST)),
+        ("delta__20261026T101000", datetime(2026, 10, 26, 19, 10, tzinfo=KST)),
+    ]
+    for run_key, at in runs:
+        r = RawRun(dataset=Dataset.CHARGER_STATUS, dt=partition_date(at), run_key=run_key)
+        _finished(mem_fs, r, at, status_items)
+
+    # AND a store that lists folders and objects in reverse order (listing order is not a contract)
+    glob = mem_fs.glob
+
+    def reversed_glob(*args: Any, **kwargs: Any) -> list[str]:
+        return list(reversed(glob(*args, **kwargs)))
+
+    monkeypatch.setattr(mem_fs, "glob", reversed_glob)
+
+    # WHEN the dataset is listed since the earlier date
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS, since=date(2026, 10, 25))
+
+    # THEN runs come by collected_at ascending, ties broken by run_key ascending
+    assert [m.run_key for m in listed] == [
+        "scheduled__2026-10-25T10-00-00",
+        "delta__20261026T101000",
+        "full__20261026T101000",
+        "manual__2026-10-26T12-00-00",
+    ]
+
+
+def test_list_manifests_of_an_empty_store_with_since_is_an_empty_list(
+    mem_fs: MemoryFileSystem,
+) -> None:
+    # GIVEN nothing written to the bucket
+    # WHEN the dataset is listed with since
+    listed = list_manifests(mem_fs, BUCKET, Dataset.CHARGER_STATUS, since=date(2026, 10, 26))
+    # THEN the result is an empty list, not an error
+    assert listed == []
+
+
 # --- RunManifest.collected ------------------------------------------------------------
 
 
