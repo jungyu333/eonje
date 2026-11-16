@@ -6,6 +6,7 @@ from eonje.storage.lake.iceberg import (
     DEFAULT_PROPERTIES,
     DIM_CHARGER,
     DIM_STATION,
+    OBS_STATUS,
     TABLES,
     Column,
     IcebergTable,
@@ -370,3 +371,63 @@ def test_registered_table_renders_create_sql(table: IcebergTable) -> None:
     # THEN it targets the table by catalog name and lists every column
     assert sql.startswith(f"CREATE TABLE IF NOT EXISTS {table.full_name} (")
     assert all(f"`{c.name}` {c.type}" in sql for c in table.columns)
+
+
+# --- OBS_STATUS -------------------------------------------------------------
+
+
+def test_obs_status_full_name_is_lake_stg_obs_status() -> None:
+    # GIVEN the observation table definition
+    # WHEN its full name is read
+    name = OBS_STATUS.full_name
+
+    # THEN it is addressed through the lake catalog in the stg namespace
+    assert name == "lake.stg.obs_status"
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["stat_id", "charger_id", "run_key", "observed_at", "observed_date", "source"],
+)
+def test_obs_status_required_column_is_not_null(column: str) -> None:
+    # GIVEN the observation table columns by name
+    by_name = {c.name: c for c in OBS_STATUS.columns}
+
+    # WHEN the required column is looked up
+    definition = by_name[column]
+
+    # THEN it is declared NOT NULL
+    assert definition.nullable is False
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["status_code", "stat_upd_dt", "last_ts", "last_te", "now_ts"],
+)
+def test_obs_status_optional_column_allows_null(column: str) -> None:
+    # GIVEN the observation table columns by name
+    by_name = {c.name: c for c in OBS_STATUS.columns}
+
+    # WHEN the optional column is looked up
+    definition = by_name[column]
+
+    # THEN it allows NULL, so empty API values are stored rather than rejected
+    assert definition.nullable is True
+
+
+def test_obs_status_is_partitioned_by_observed_date_only() -> None:
+    # GIVEN the observation table definition
+    # WHEN its partition columns are read
+    partitions = OBS_STATUS.partitioned_by
+
+    # THEN observed_date is the single partition column
+    assert partitions == ("observed_date",)
+
+
+def test_obs_status_create_sql_partitions_by_observed_date() -> None:
+    # GIVEN the observation table definition
+    # WHEN its DDL is rendered
+    sql = create_table_sql(OBS_STATUS)
+
+    # THEN the CREATE statement carries exactly that partition clause
+    assert "\nPARTITIONED BY (`observed_date`)\n" in sql
