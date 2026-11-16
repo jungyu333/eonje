@@ -35,6 +35,8 @@ class Settings(DatabaseSettings):
     # API 창(최근 status_period_min분)보다 클 수 없다. 크면 창이 덮지 못하는 run까지 받는다
     fetch_max_lag_min: int | None = Field(default=None, ge=1)
     master_max_lag_min: int = Field(default=60, ge=1)
+    collect_timeout_min: int = Field(default=5, ge=1)
+    master_timeout_min: int = Field(default=20, ge=1)
     # 마스터 run의 행 수가 지금 차원의 충전기 수의 이 비율보다 작으면 차원에 반영하지 않는다.
     # 일부만 받은 run이 나머지를 없어진 것으로 기록하지 않게 한다
     master_min_row_ratio: float = Field(default=0.9, gt=0, le=1)
@@ -62,6 +64,16 @@ class Settings(DatabaseSettings):
     @property
     def master_max_lag(self) -> timedelta:
         return timedelta(minutes=self.master_max_lag_min)
+
+    @property
+    def status_settle(self) -> timedelta:
+        """상태 변경분 run이 더 나타날 수 없게 되기까지의 시간: 지연 허용치 + 수집 타임아웃."""
+        return self.fetch_max_lag + timedelta(minutes=self.collect_timeout_min)
+
+    @property
+    def master_settle(self) -> timedelta:
+        """마스터 run이 더 나타날 수 없게 되기까지의 시간: 지연 허용치 + 수집 타임아웃."""
+        return self.master_max_lag + timedelta(minutes=self.master_timeout_min)
 
     @model_validator(mode="after")
     def _lag_within_api_window(self) -> Settings:
