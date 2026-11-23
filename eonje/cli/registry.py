@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from eonje.cli.context import JobContext
 from eonje.cli.jobs import (
+    dedupe_load_obs,
     ensure_iceberg_tables,
     fetch_delta,
     fetch_master,
@@ -21,4 +22,5 @@ JOBS: dict[str, Job] = {
     "ensure-iceberg-tables": ensure_iceberg_tables.run,
     "load-dims": load_dims.run,
     "load-dim-date": load_dim_date.run,
+    "dedupe-load-obs": dedupe_load_obs.run,
 }
