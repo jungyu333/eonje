@@ -17,6 +17,7 @@ x-airflow: &airflow
     EONJE_IMAGE_TAG: ${EONJE_IMAGE_TAG:-dev}
     EONJE_STATUS_INTERVAL_MIN: ${EONJE_STATUS_INTERVAL_MIN:-10}
     EONJE_COLLECT_TIMEOUT_MIN: ${EONJE_COLLECT_TIMEOUT_MIN:-5}
+    EONJE_MASTER_TIMEOUT_MIN: ${EONJE_MASTER_TIMEOUT_MIN:-20}
   volumes:
     - ../dags:/opt/airflow/dags:ro      # 개발용. 운영은 CD PR에서 GitDagBundle로
     - airflow-logs:/opt/airflow/logs
@@ -210,6 +211,29 @@ services:
     entrypoint: [ "sh", "-c" ]
     command:
       - exec python -m eonje.cli load-dim-date --run-id load-dim-date --run-after "$$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+
+  # 원본 run → 관측 (dedupe-load-obs 잡). 운영에서는 ev_transform_10min이 같은 잡을 돌린다
+  # 처리할 run은 워터마크와 지금 시각으로 정하므로 run_id·run_after는 CLI가 요구해서 넘길 뿐이다
+  dedupe-load-obs:
+    image: ${EONJE_IMAGE_REPO:-eonje}-spark:${EONJE_IMAGE_TAG:-dev}
+    profiles: [ "tools" ]
+    env_file: ../.env
+    environment:
+      EONJE_DATABASE_URL: postgresql+psycopg://eonje:${EONJE_DB_PASSWORD:?set EONJE_DB_PASSWORD in .env}@postgres:5432/eonje
+      EONJE_S3_ENDPOINT_URL: http://seaweedfs:8333
+      EONJE_SPARK_MASTER: spark://spark-master:7077
+    entrypoint: [ "sh", "-c" ]
+    command:
+      - exec python -m eonje.cli dedupe-load-obs --run-id dedupe-load-obs --run-after "$$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
     depends_on:
       postgres:
         condition: service_healthy

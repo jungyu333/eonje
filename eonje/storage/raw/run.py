@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, fields
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from fsspec import AbstractFileSystem
 
@@ -146,13 +146,20 @@ def read_manifest(fs: AbstractFileSystem, bucket: str, run: RawRun) -> RunManife
     return _load_manifest(fs, path)
 
 
-def list_manifests(fs: AbstractFileSystem, bucket: str, dataset: Dataset) -> list[RunManifest]:
-    """데이터셋의 완료된 run 전부를 (collected_at, run_key) 오름차순으로 돌려준다.
+def list_manifests(
+    fs: AbstractFileSystem, bucket: str, dataset: Dataset, *, since: date | None = None
+) -> list[RunManifest]:
+    """데이터셋의 완료된 run을 (collected_at, run_key) 오름차순으로 돌려준다.
 
-    manifest가 없는 run(수집 중, 중간 실패)은 나오지 않는다. 날짜 폴더를 전부 훑으므로
-    하루 1번 쌓이는 마스터용이다. 10분마다 쌓이는 상태 변경분은 날짜 범위를 받게 고쳐 쓴다 (4단계).
+    manifest가 없는 run(수집 중, 중간 실패)은 나오지 않는다.
+    since를 주면 dt가 그 날짜(KST) 이상인 폴더만 훑는다. 10분마다 쌓이는 상태 변경분은 워터마크의
+    날짜를 넘겨서, 이미 처리한 날짜의 폴더를 매번 다시 읽지 않게 한다. 없으면 전부 훑는다.
     """
-    paths = fs.glob(f"{bucket}/{dataset}/dt=*/run=*/_manifest.json")
+    days = fs.glob(f"{bucket}/{dataset}/dt=*")
+    if since is not None:
+        first = f"dt={since:%Y-%m-%d}"  # ISO 날짜는 문자열 순서가 날짜 순서다
+        days = [day for day in days if day.rsplit("/", 1)[-1] >= first]
+    paths = [path for day in sorted(days) for path in fs.glob(f"{day}/run=*/_manifest.json")]
     manifests = [_load_manifest(fs, path) for path in paths]
     return sorted(manifests, key=lambda m: (m.collected, m.run_key))
 

@@ -9,8 +9,10 @@ from __future__ import annotations
 from datetime import datetime
 from functools import reduce
 
-from pyspark.sql import Column, DataFrame, Window
+from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
+
+from eonje.transform.text import blank_to_null
 
 Field = tuple[str, str, str]  # (내부 이름, API 필드, Spark 타입)
 
@@ -59,7 +61,6 @@ CHARGER_FIELDS: tuple[Field, ...] = (
 
 _SEP = "\u001f"  # 값 사이 구분자 (값에 나오지 않는 제어 문자)
 _NULL = "\u0000"  # NULL과 빈 값을 해시에서 구분
-_EDGE_SPACE = r"^[\s\p{Z}]+|[\s\p{Z}]+$"  # 앞뒤 공백 (탭·줄바꿈·전각 공백 포함)
 
 
 def stations(raw: DataFrame) -> DataFrame:
@@ -72,19 +73,14 @@ def chargers(raw: DataFrame) -> DataFrame:
     return _dimension(raw, CHARGER_FIELDS, CHARGER_KEY, tie_breaker=None)
 
 
-def _blank_to_null(api_field: str) -> Column:
-    """앞뒤 공백을 지우고, 남는 게 없으면 NULL. trim은 ASCII 공백만 지워서 정규식을 쓴다."""
-    return F.nullif(F.regexp_replace(F.col(api_field), _EDGE_SPACE, ""), F.lit(""))
-
-
 def _dimension(
     raw: DataFrame, fields: tuple[Field, ...], key: tuple[str, ...], tie_breaker: str | None
 ) -> DataFrame:
     attrs = [name for name, _, _ in fields if name not in key]
     # 정리(공백·빈 값)와 타입 변환을 먼저 한다. 숫자가 아닌 값은 실패하지 않고 NULL이 된다
     typed = raw.select(
-        *[_blank_to_null(api).try_cast(spark_type).alias(name) for name, api, spark_type in fields],
-        (_blank_to_null(tie_breaker) if tie_breaker else F.lit(None).cast("string")).alias("_tie"),
+        *[blank_to_null(api).try_cast(spark_type).alias(name) for name, api, spark_type in fields],
+        (blank_to_null(tie_breaker) if tie_breaker else F.lit(None).cast("string")).alias("_tie"),
         F.col("page_no").alias("_page_no"),
     )
     for k in key:  # 키가 비어 있는 행은 차원 행이 될 수 없다

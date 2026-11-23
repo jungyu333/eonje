@@ -15,12 +15,13 @@ SKIPPED = 99  # eonje.cli.exit_codes.SKIPPED (예산 소진, 늦은 run)
 API_POOL = "evcharger_api"
 SPARK_POOL = "spark"
 
-# compose·Airflow 쪽에서만 쓰는 값. 태스크 컨테이너에는 넘기지 않는다
+# compose·Airflow 쪽에서만 쓰는 값. 태스크 컨테이너에는 넘기지 않는다.
+# 수집 타임아웃(EONJE_COLLECT_TIMEOUT_MIN, EONJE_MASTER_TIMEOUT_MIN)은 넘긴다:
+# 변환 잡이 run의 완료가 확정되는 시간을 계산할 때 DAG와 같은 값을 써야 한다
 _NOT_FOR_TASKS = {
     "EONJE_DB_PASSWORD",
     "EONJE_IMAGE_REPO",
     "EONJE_IMAGE_TAG",
-    "EONJE_COLLECT_TIMEOUT_MIN",
     "EONJE_TASK_NETWORK",
 }
 

@@ -23,13 +23,17 @@ eonje/        # Pure Python package. Never imports airflow.
   load/       # Load flows: apply raw runs after the task's watermark to the DW (skip policy -> transform -> MERGE ->
               #   watermark). The raw read and the watermark advance are injected, so flows are tested with Spark alone.
               #   dates.py rebuilds dim_date (holiday fetch -> date rows) and overwrites it only when it changed.
+              #   pending.py picks the runs to process (after the watermark, settled, one batch per day);
+              #   observations.py loads them into stg.obs_status, one watermark per dataset.
   storage/    # One subpackage per store:
               #   postgres/ models.py (SQLAlchemy ORM), db.py (engine, staging -> ON CONFLICT), call_log.py, watermark.py
               #   raw/      fs.py (S3 filesystem), paths.py, writer.py (Parquet write, collector), run.py (run + manifest)
               #   lake/     spark.py (SparkSession + Iceberg catalog, s3a read, JDBC staging write),
               #             iceberg.py (Iceberg table definitions), dims.py (dimension load I/O: raw run read, MERGE),
-              #             dates.py (dim_date read, whole-table overwrite)
+              #             dates.py (dim_date read, whole-table overwrite),
+              #             observations.py (multi-run raw read tagged with run_key/source, insert-missing MERGE)
   transform/  # Pure functions. Spark DataFrame in -> DataFrame out. No I/O. (dates.py is plain Python, no Spark.)
+              #   text.py holds the raw-string cleanup shared by dims.py and observations.py.
   codes/      # Versioned code tables (YAML) + loader
 api/          # FastAPI. Read-only over aggregate/prediction tables. Uses eonje.storage.postgres.models.
 dags/         # Thin Airflow DAGs (a plain folder, no __init__.py). DockerOperator running eonje.cli in a runtime image;
@@ -76,8 +80,11 @@ docs/         # design.md, requirements.md
   and delete the original; only an incomplete run is cleared and fetched again. `stg.obs_status` and `core.evt_transition`: ignore on conflict (facts are append-only; corrections are new rows).
   `core.fact_session`: `MERGE`. Aggregates: delete the window, recompute.
 - **Transforms keep one watermark per task** (`ops.transform_watermark`). Each task commits its own writes, then its
-  own watermark; an upstream task's watermark caps what the downstream task may process. Raw runs (delta and full) are
-  processed in `collected_at` order by the same flow, so reconciliation never jumps ahead of pending deltas.
+  own watermark; an upstream task's watermark caps what the downstream task may process.
+  Observation loading (`dedupe_load_obs`) is the exception: one watermark per dataset (delta, full), because a master
+  run can finish late and a shared watermark would move past it. It processes only settled runs (max lag + collect
+  timeout after `collected_at`), one batch per day. Run order across datasets matters from transition derivation on;
+  how that task combines the two watermarks is still open (design.md section 12).
   `load_dims` skips a master run that must not be applied (empty, truncated, row count dropped) without advancing its
   watermark; a later applied run moves the watermark past it.
 - **Cross-store writes go Iceberg first, Postgres last.** Transition derivation commits `core.evt_transition` (MERGE),
@@ -114,10 +121,11 @@ docs/         # design.md, requirements.md
 - Transforms are watermark-based: process every unprocessed raw run, not just the current one.
 - A `MERGE` source must not reference the target table. Materialize it first (`localCheckpoint`, see
   `storage/lake/dims.py`): a temp view over a DataFrame that reads the target fails to plan on Spark 4.1.
-- Modules that import pyspark at import time (`transform/dims.py`, `load/dims.py`) are imported inside a job's `run()`,
-  never at the top of a job module: the registry imports every job and the collector image has no pyspark.
+- Modules that import pyspark at import time (`transform/dims.py`, `transform/observations.py`, `transform/text.py`,
+  and the flows that import them: `load/dims.py`, `load/observations.py`) are imported inside a job's `run()`, never
+  at the top of a job module: the registry imports every job and the collector image has no pyspark.
   Modules that are plain Python or import pyspark only inside functions (`transform/dates.py`, `load/dates.py`,
-  `storage/lake/`) are imported at the top, as `cli/jobs/load_dim_date.py` does.
+  `load/pending.py`, `storage/lake/`) are imported at the top, as `cli/jobs/load_dim_date.py` does.
 
 ## Runtime & Deployment
 

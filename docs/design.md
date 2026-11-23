@@ -110,6 +110,8 @@ eonje/
       policy.py           # full run을 반영해도 되는지 판단 (0건·잘림·행 수 급감). 순수 함수
       dims.py             # 마스터 full run → dim_station·dim_charger (SCD2)
       dates.py            # dim_date 채우기: 공휴일 조회 → 날짜 행 → 지금 테이블과 다를 때만 전체 덮어쓰기
+      pending.py          # 처리할 run 고르기: 워터마크 뒤이고 완료가 확정된 run을 날짜(dt)별 묶음으로. 순수 함수
+      observations.py     # 원본 run(delta·full) → stg.obs_status. 묶음마다 변환 → MERGE → 워터마크
     storage/              # 저장소마다 하위 패키지 하나 (2026.11.05 정리)
       postgres/
         models.py         # SQLAlchemy ORM 모델 (Postgres 스키마 mart·ops의 단일 출처. Alembic autogenerate 대상)
@@ -120,15 +122,17 @@ eonje/
         fs.py             # S3 파일시스템, 접속 키 확인
         paths.py          # 원본 경로 규칙 (run 단위 prefix, 페이지·manifest 경로)
         writer.py         # 페이지 Parquet 쓰기 (수집)
-        run.py            # run 쓰기와 manifest (완료 표시)
+        run.py            # run 쓰기와 manifest (완료 표시), 완료된 run 나열 (시작 날짜 지정 가능)
       lake/               # DW (Iceberg) — Spark
         spark.py          # SparkSession 생성(설정·Iceberg 카탈로그 주입), s3a 읽기, JDBC 스테이징 쓰기
         iceberg.py        # Iceberg 테이블 정의(스키마·파티션)의 단일 출처. 멱등한 생성·컬럼 추가로 적용 (3단계)
         dims.py           # 차원 적재의 읽기·쓰기: 원본 run 읽기(s3a), 현재 버전 수, 변경분 MERGE
         dates.py          # dim_date 읽기와 전체 덮어쓰기
+        observations.py   # 관측 적재의 읽기·쓰기: run 여러 개 읽기(행마다 run_key·source), 없는 키만 넣는 MERGE
     transform/            # 순수 함수. Spark DataFrame in → DataFrame out. I/O 없음
       dims.py             # 마스터 필드 → 차원 행(충전소·충전기: 내부 어휘, 타입, row_hash), SCD2 비교·갱신 행 생성
       dates.py            # 기간 + 공휴일 → dim_date 행 (요일·주말·공휴일). Spark를 쓰지 않는 순수 파이썬
+      text.py             # 원본 문자열 값 정리 (앞뒤 공백 제거, 빈 값은 NULL). dims·observations가 같이 쓴다
       observations.py     # API 어휘 → 내부 어휘, 타입 변환, run 안 중복 제거 (observed_at = run의 collected_at)
       transitions.py      # charger_state와 비교 → 전이 이벤트
       sessions.py         # last_ts/last_te/now_ts → 세션 upsert 행
@@ -225,7 +229,7 @@ flowchart TB
 
 ```
 [10분마다]  수집: 예산 확인 → period=10 전 페이지 → raw 저장                     (레이크)
-            변환: 미처리 run을 수집 시각 순으로 (delta·full 함께)
+            변환: 워터마크 뒤의 확정된 run을 수집 시각 순으로 (관측 적재는 delta·full 워터마크를 따로 둔다)
             → 타입 변환·run 안 중복 제거 → stg.obs_status                         (DW)
             → ops.charger_state와 비교 → core.evt_transition, charger_state 갱신   (DW → 서빙)
               (full run이면 불일치를 보정 전이 source=reconciled로)
@@ -322,6 +326,8 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
 ### 차원으로 쓸 수 있는 마스터 필드
 
 `kind`/`kindDetail`(시설 유형 10/70여 종), `zcode`/`zscode`(시도/시군구), `busiId`(운영기관 140여), `chgerType`(11종, NACS 포함), `output`(kW), `method`(단독/동시), `limitYn`/`limitDetail`, `parkingFree`, `useTime`, `year`(설치년도), `floorType`/`floorNum`, `delYn`/`delDetail`(철거 이력), `maker`.
+
+실측(2026.11.10 마스터): `maker`가 비어 있던 충전기 약 20만 대(전체의 38%)가 하루 사이에 제조사 이름으로 채워져 왔다. 수집 코드는 그대로였고 그 뒤 run에서는 다시 바뀌지 않았다. 차원에는 그날 20만 건의 새 버전으로 남았다 (운영 `load_dims` 첫 실행에서 확인, 2026.11.16). 마스터 필드는 이렇게 한꺼번에 바뀔 수 있다.
 
 ### 공휴일: 특일 정보 API (2026.11.15)
 
@@ -428,6 +434,12 @@ Base: `https://apis.data.go.kr/B552584/EvCharger/`
   - 해마다 한 번씩 조회한다 (첫 해 ~ 내년). 올해까지의 해에 공휴일이 0건이면 응답이 잘못된 것으로 보고 실패하고 테이블은 그대로 둔다. 내년은 발표됐을 때만 넣는다
   - 새로 만든 행을 지금 테이블과 날짜별로 비교해 **다를 때만** `INSERT OVERWRITE`로 전체를 바꾼다 (커밋 하나). 같으면 쓰지 않아 스냅샷이 쌓이지 않고, 바뀐 날짜(임시공휴일 등)는 로그에 남는다
   - 쓰이는 곳: 집계에서 요일을 붙이고 공휴일을 평일 패턴에서 빼거나 따로 묶는다(6단계). 예측의 입력(9단계). 지금은 읽는 곳이 없다
+- **관측 규칙 (`transform/observations.py`, 2026.11.23).** 원본 한 행(충전기 1대가 run 1회에 나온 것)이 `stg.obs_status` 한 행이다
+  - 상태 변경분(delta)과 마스터(full) 응답의 상태 필드(`stat`, `statUpdDt`, `lastTsdt`, `lastTedt`, `nowTsdt`)만 쓴다. 마스터 응답에도 같은 필드가 있어 `source`만 다르다
+  - 값 정리는 차원과 같은 함수를 쓴다(`transform/text.py`): 앞뒤 공백을 지우고 빈 값은 NULL. 키를 양쪽에서 똑같이 정리해야 차원과 조인이 맞는다
+  - 시각(`yyyyMMddHHmmss`)은 시간대 표시가 없는 KST라 Spark 세션 시간대(`Asia/Seoul`)로 읽는다. 읽을 수 없는 값은 실패하지 않고 NULL이다. `observed_date`는 `observed_at`의 KST 날짜로, 원본의 `dt`와 같다
+  - 키(`statId`, `chgerId`)가 빈 행은 버린다. `status_code`는 받은 값 그대로 두고 해석하지 않는다
+  - 잘린 run(예산 상한)도 넣는다. 차원과 달리 관측은 행 하나하나가 유효하다. 행이 없는 run은 읽지 않고 워터마크만 넘긴다
 - 유지보수 (하루 1번): 작은 파일 합치기(`rewrite_data_files`), 오래된 스냅샷 정리(`expire_snapshots`), 고아 파일 정리(`remove_orphan_files`). 10분마다 커밋해 작은 파일이 계속 생기므로 필수
 
 ### 서빙·운영 (Postgres `eonje` DB, `storage/postgres/models.py`)
@@ -475,14 +487,22 @@ KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉
 
 2단계에서는 이 태스크 하나다. 수집 DAG의 태스크는 쪼개지 않는다: 페이지별 태스크는 페이지 사이 간격이 컨테이너 기동만큼 벌어져 드리프트가 커지고, 재시도는 클라이언트(페이지 단위)와 멱등 재실행으로 충분하다. 수집 후 검증·품질 지표 태스크는 4단계에서 뒤에 붙인다.
 
-> **7장의 아래 세 DAG(`ev_transform_10min`, `ev_aggregate_hourly`, `lake_maintenance_daily`)는 초안이다.** 방향(워터마크, 쓰기 순서, 테이블 역할)만 정하고, 세부 규칙은 4단계 이후 구현과 테스트로 확정한다.
+> **7장의 아래 세 DAG(`ev_transform_10min`, `ev_aggregate_hourly`, `lake_maintenance_daily`)는 초안이다.** 방향(워터마크, 쓰기 순서, 테이블 역할)만 정하고, 세부 규칙은 4단계 이후 구현과 테스트로 확정한다. `ev_transform_10min`의 `dedupe_load_obs`만 확정했다 (2026.11.23).
 
-### `ev_transform_10min` (4단계, 분리 후보)
-1. `dedupe_load_obs` (S) — 미처리 원본 run(delta·full)을 타입 변환, run 안 중복 제거 후 `stg.obs_status` 적재 (`source=delta|full`)
+### `ev_transform_10min` (4단계. 매시 5·15·25…분)
+1. `dedupe_load_obs` (S, pool `spark`) — 미처리 원본 run(delta·full)을 타입 변환, run 안 중복 제거 후 `stg.obs_status` 적재 (`source=delta|full`). **구현 완료(2026.11.23)**, 세부는 아래 "관측 적재"
 2. `derive_transitions` (S) — `stg.obs_status`를 run 순서대로 `ops.charger_state`와 비교해 `core.evt_transition` 추가, `charger_state` 갱신. full run이면 불일치가 보정 전이(`source=reconciled`)
 3. `upsert_sessions` (S) — `last_ts`/`last_te`/`now_ts`로 `core.fact_session` `MERGE`
 
-**워터마크는 태스크마다 따로 둔다** (`ops.transform_watermark`: 태스크 → 처리한 마지막 run). 각 태스크는 자기 쓰기를 커밋한 뒤 자기 워터마크를 올린다. 앞 태스크의 워터마크가 뒤 태스크가 처리할 수 있는 상한이다 (`derive_transitions`는 `dedupe_load_obs`가 끝낸 run까지만). 그래서 3번만 실패해 3번만 재시도해도 자기 워터마크부터 이어서 처리한다. 1~3을 한 Spark 앱으로 묶어도 워터마크는 태스크별로 같은 규칙을 따른다. run 순서는 `collected_at` 오름차순(같으면 `run_key`). 단, 아직 완료될 수 있는 run을 지나치지 않도록 `collected_at`이 지금보다 수집 지연 허용치(`EONJE_FETCH_MAX_LAG_MIN`)와 수집 태스크 최대 실행 시간(`EONJE_COLLECT_TIMEOUT_MIN`, 수집 태스크의 Airflow `execution_timeout`과 같은 값) 이상 지난 run까지만 처리한다. 그렇지 않으면 실패 후 재시도로 늦게 완료된 이른 run이 워터마크 뒤에 남아 영영 처리되지 않는다.
+**관측 적재 (`dedupe_load_obs`, 2026.11.23 확정).** 잡 `dedupe-load-obs`, 흐름 `load/observations.py`.
+- **워터마크는 데이터셋마다 따로 둔다** (`dedupe_load_obs:charger_status`, `dedupe_load_obs:charger_info`). 초안은 delta와 full을 한 줄로 세워 워터마크 하나로 처리했는데, 그러면 늦게 끝난 마스터 run을 놓친다. 마스터 run의 `collected_at`은 03:11이지만 타임아웃 뒤 재시도하면 03:40을 넘겨 끝날 수 있고, 그 사이 상태 변경분이 워터마크를 03:11 뒤로 넘긴다. 관측은 키에 `run_key`가 있어 run끼리 순서가 상관없으므로 따로 두어도 결과가 같다. 순서가 필요한 것은 전이 계산이고, 두 워터마크를 어떻게 합쳐 볼지는 그때 정한다 (12장)
+- **완료가 확정된 run만 처리한다.** 확정 시간은 데이터셋마다 다르다: 상태 변경분은 `EONJE_FETCH_MAX_LAG_MIN` + `EONJE_COLLECT_TIMEOUT_MIN`(기본 10 + 5 = 15분), 마스터는 `EONJE_MASTER_MAX_LAG_MIN` + `EONJE_MASTER_TIMEOUT_MIN`(기본 60 + 20 = 80분). 타임아웃 값은 수집 DAG의 `execution_timeout`과 같은 환경 변수에서 읽는다 (`config.py`의 `status_settle`·`master_settle`. 고르는 함수는 `load/pending.py`)
+- **날짜(`dt`)별로 묶어 처리한다.** 묶음 하나가 `MERGE` 한 번이고 `observed_date` 파티션 하나다. `MERGE` 뒤에 워터마크를 그 묶음의 마지막 run으로 올린다. 평소에는 run 1개짜리 묶음이고, 밀렸을 때만 하루치(run 144개)가 한 묶음이 된다. run마다 커밋하면 밀린 만큼 스냅샷이 쌓인다
+- 원본은 묶음의 run 폴더를 한 번에 읽는다. `run_key`는 원본 행에 없어 파일 경로의 `run=...`에서 꺼낸다 (`storage/lake/observations.py`). manifest는 워터마크의 날짜부터만 나열한다
+- **스케줄은 매시 5·15·25…분** (`5-59/10 * * * *`). 수집은 정각 10분 단위이고 그 run은 15분 뒤에 확정되므로, 10:00 run을 10:15에 집는다. 수집 직후에 Asset으로 깨우면 그때는 아직 확정 전이라 한 회차 늦어진다. `execution_timeout` 30분, 재시도 1회 1분 간격, 드라이버 `mem_limit` 2g
+- 실측(2026.11.23, 개발 PC): run 18개(상태 변경분 12, 마스터 6) → 1,079,612행, Spark 기동을 포함해 26초. 62만 행 묶음이 약 6초. 다시 돌리면 아무것도 하지 않는다. 하루치 묶음(run 144개, 원본 203만 행)은 개발 환경에 데이터가 없어 힙 1g·코어 2개의 로컬 Spark로 따로 쟀다: 약 62초(`MERGE` 대신 Parquet 쓰기로 잰 근사치), 메모리 문제 없음. 운영 첫 실행은 밀린 날짜 수만큼 분 단위로 걸리고, 도중에 끊겨도 날짜별 워터마크부터 이어서 한다
+
+**워터마크는 태스크마다 따로 둔다** (`ops.transform_watermark`: 태스크 → 처리한 마지막 run. `dedupe_load_obs`만 데이터셋마다 하나씩이다, 위). 각 태스크는 자기 쓰기를 커밋한 뒤 자기 워터마크를 올린다. 앞 태스크의 워터마크가 뒤 태스크가 처리할 수 있는 상한이다 (`derive_transitions`는 `dedupe_load_obs`가 끝낸 run까지만). 그래서 3번만 실패해 3번만 재시도해도 자기 워터마크부터 이어서 처리한다. 1~3을 한 Spark 앱으로 묶어도 워터마크는 태스크별로 같은 규칙을 따른다. run 순서는 `collected_at` 오름차순(같으면 `run_key`). 단, 아직 완료될 수 있는 run을 지나치지 않도록 `collected_at`이 지금보다 수집 지연 허용치(`EONJE_FETCH_MAX_LAG_MIN`)와 수집 태스크 최대 실행 시간(`EONJE_COLLECT_TIMEOUT_MIN`, 수집 태스크의 Airflow `execution_timeout`과 같은 값) 이상 지난 run까지만 처리한다 (마스터 run은 `EONJE_MASTER_MAX_LAG_MIN`과 `EONJE_MASTER_TIMEOUT_MIN`). 그렇지 않으면 실패 후 재시도로 늦게 완료된 이른 run이 워터마크 뒤에 남아 영영 처리되지 않는다.
 
 **`ops.charger_state`를 쓰는 건 `derive_transitions` 하나뿐이고, 동시에 두 개가 돌지 않게 한다.** 변환 DAG `max_active_runs=1`과 pool `spark` 슬롯 수와 무관하게, 태스크가 Postgres advisory lock(`pg_advisory_lock`)을 잡고 돈다. 수동 CLI 실행도 같은 lock에 걸린다.
 
@@ -495,7 +515,7 @@ KST 03:11 (cron `11 18 * * *`, UTC). 한도가 리셋된 직후라 예산이 넉
 
 - `charger_state`에 없는 충전기는 첫 관측이 전이 없이 상태만 만든다
 
-수집 DAG 뒤에 붙이지 않고 별도 DAG로 두는 안이 유력하다. 변환은 워터마크라 이번 수집이 skipped여도 밀린 run을 처리해야 하는데, 같은 DAG면 skip이 뒤로 전파된다(`trigger_rule="none_failed"`로 우회해야 함). 별도 DAG면 수집과 변환이 서로 막지 않는다. 실행은 `fetch_delta`가 원본을 쓴 뒤의 Airflow Asset 또는 자체 10분 스케줄. 1~3을 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을지는 소요 시간을 재 보고 정한다.
+수집 DAG 뒤에 붙이지 않고 별도 DAG로 둔다 (2026.11.23 확정). 변환은 워터마크라 이번 수집이 skipped여도 밀린 run을 처리해야 하는데, 같은 DAG면 skip이 뒤로 전파된다(`trigger_rule="none_failed"`로 우회해야 함). 별도 DAG면 수집과 변환이 서로 막지 않는다. 실행은 자체 10분 스케줄이다 (위 "관측 적재"). 1~3을 한 Spark 앱(드라이버 컨테이너 하나)으로 묶을지는 전이와 세션을 만든 뒤 소요 시간을 재 보고 정한다.
 
 ### `ev_aggregate_hourly` (매시)
 1. `agg_occupancy` (S) — `stg.obs_status`(관측·결측 판정)와 `core`(세션·전이) + 디멘션 → `mart.agg_occupancy_hourly`·`agg_station_hourly` (구간 삭제 후 재계산). **구간의 끝은 변환 워터마크(`derive_transitions`·`upsert_sessions` 중 이른 쪽)까지**이고, 지난 실행 이후 워터마크가 지나간 구간만 다시 계산한다. 아직 변환되지 않은 최근 구간을 '모름'으로 확정하지 않기 위해서다
@@ -625,7 +645,7 @@ compose로 시작하고 B 추가 시 k3s를 다시 검토한다 (2026.10.22 결�
 ### 8.7 용량과 설정
 
 - 용량 추정: 변경분 10분당 ~14k행 × 144 ≈ 200만 행/일(관측). Parquet 압축 시 수십 MB/일. 관측·팩트는 Iceberg(날짜 파티션)에 쌓여 Postgres 크기와 무관하고, Postgres에는 마트·현재 상태·운영 테이블만 남는다
-- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN`(상태 변경분 수집 태스크 `execution_timeout`이자 변환 워터마크 여유. 1페이지 최악 30초 × 3회 + 백오프를 넘게. 마스터 수집은 DAG 상수 20분), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_MASTER_MIN_ROW_RATIO=0.9`(마스터 run의 행 수가 현재 충전기 수의 이 비율보다 적으면 차원에 반영하지 않는다, 7장), `EONJE_DIM_DATE_FIRST_YEAR=2026`(날짜 차원이 시작하는 해), `EONJE_HOLIDAY_API_BASE_URL`(특일 정보 API, 4장), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
+- 설정값 (`EONJE_` 접두 환경변수, `config.py`): `EONJE_API_DAILY_LIMIT=1000`, `EONJE_STATUS_INTERVAL_MIN=10`, `EONJE_STATUS_PERIOD_MIN=10`, `EONJE_SERVE_ZCODES=["11"]`, `EONJE_PAGE_SIZE=9999`, `EONJE_RAW_BUCKET=eonje-raw`, `EONJE_WAREHOUSE_BUCKET=eonje-warehouse`, `EONJE_ICEBERG_SNAPSHOT_RETENTION_DAYS`(시간 여행 보존 기간, 값은 미결), `EONJE_COLLECT_TIMEOUT_MIN=5`(상태 변경분 수집 태스크의 `execution_timeout`. 1페이지 최악 30초 × 3회 + 백오프를 넘게), `EONJE_MASTER_TIMEOUT_MIN=20`(마스터 수집 태스크의 `execution_timeout`. 이 둘은 변환 잡도 읽어서, 지연 허용치에 더해 run의 완료가 확정되는 시간을 계산한다, 7장), `EONJE_FETCH_MAX_LAG_MIN`, `EONJE_MASTER_MAX_LAG_MIN=60`, `EONJE_MASTER_MIN_ROW_RATIO=0.9`(마스터 run의 행 수가 현재 충전기 수의 이 비율보다 적으면 차원에 반영하지 않는다, 7장), `EONJE_DIM_DATE_FIRST_YEAR=2026`(날짜 차원이 시작하는 해), `EONJE_HOLIDAY_API_BASE_URL`(특일 정보 API, 4장), `EONJE_SPARK_MASTER`, `EONJE_IMAGE_TAG`. Iceberg JDBC 카탈로그는 `EONJE_DATABASE_URL`의 `eonje` DB를 쓰고 스키마 이름(`iceberg`)과 Spark 카탈로그 이름(`lake`)은 코드 상수
 - 시크릿: 서비스 키는 노드 `.env` → 태스크 컨테이너 환경변수로 주입. 레포에 넣지 않음
 
 ## 9. 서빙 (초안)
@@ -658,7 +678,7 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 | 1 | 레포 골격 (패키지, cli, config, Makefile, pre-commit) → 이미지·CI (`docker/tasks/collector`, ci.yml, `.env.example`) | — | 개발 PC |
 | 2 | 수집기 배포: API 클라이언트, 원본 저장(SeaweedFS), `api_call_log` + 첫 Alembic 마이그레이션 + 예산 관리자(첫 버전), `fetch_delta`, CD(GHCR, Tailscale 배포, GitDagBundle). **A에서 돌리기 시작** (수집은 멈추면 복구 불가라 가장 먼저) | Python | A |
 | 3 | ~~첫 작업: 호환성 확인~~ **완료(2026.11.03, 11/11, 8.2)**. ~~Spark 도입(A에 master·worker, `storage/lake/spark.py`, `iceberg` 스키마, `spark-check`)~~ **완료(2026.11.05, 8.2)**. ~~`storage/lake/iceberg.py` + `ensure-iceberg-tables`(`core.dim_station`·`dim_charger`·`dim_date` 생성, 배포 단계)~~ **완료(2026.11.09)**. ~~`fetch-master` + `ev_master_daily`(수집), 수집 잡 직렬화(pool `evcharger_api`)~~ **완료(2026.11.09)**. ~~`load_dims`(`core.dim_station`·`dim_charger` SCD2, `transform_watermark`, `ev_master_daily`의 두 번째 태스크, pool `spark`)~~ **완료(2026.11.15)**. ~~`dim_date`(공휴일은 특일 정보 API, 잡 `load-dim-date`, `ev_master_daily`의 독립 태스크)~~ **완료(2026.11.15)** | fetch Python, load Spark | A |
-| 4 | 관측 → 전이 → 세션 (10분 Spark 변환, `ev_transform_10min`), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
+| 4 | ~~관측 (`stg.obs_status`, 잡 `dedupe-load-obs`, DAG `ev_transform_10min`)~~ **완료(2026.11.23)**. 이어서 전이 → 세션 (같은 DAG의 뒤 태스크), `ops.charger_state`, `lake_maintenance_daily`, 품질 지표. 며칠치 데이터로 검증 (전이 누락률, 세션 복원률) | Spark | A |
 | 5 | 예산 관리자 고도화, 스냅샷 보정, 백필 | Spark | A → 신호가 보이면 B 추가 |
 | 6 | 집계 + API (`eonje-api`) | Spark / FastAPI | A (+B worker) |
 | 7 | 프론트 (개발 PC와 Tailscale 안에서 API에 붙여 확인) | — | A |
@@ -681,9 +701,12 @@ FastAPI. 집계·예측 테이블만 읽는다. `/v1/` 접두. 충전소 상세�
 - 오프사이트 백업 대상 (R2 vs B2)
 - B 추가 후 A의 Spark worker 유지(2워커) 여부
 - B의 Docker 데몬 접근 방식 (SSH vs TLS)
-- 변환 태스크를 한 Spark 앱으로 묶을지 (소요 시간 측정 후), 변환 DAG를 수집 DAG와 분리할지 (4단계, 7장)
+- 변환 태스크를 한 Spark 앱으로 묶을지 (전이·세션을 만든 뒤 소요 시간 측정, 7장)
+- 전이 계산이 delta와 full 두 워터마크를 어떻게 합쳐 run 순서를 정할지. 늦게 끝난 full run은 이미 지나간 시점의 스냅샷이라 보정에 그대로 쓸 수 없다 (7장 "관측 적재")
+- 잘린 full run을 보정(`reconciled`)에서 빼는 방법. 관측에는 `source=full`로 들어가 있어, run이 온전했는지는 manifest를 봐야 안다
+- `api_call_log`·`transform_watermark`를 `ops` 스키마로 옮기기 (`ops.charger_state`를 만들기 전에)
 - `ops.charger_state`를 Postgres에 두는 게 맞는지 (10분 갱신 비용을 4단계에서 측정). Iceberg로 옮기면 전이 계산이 한 저장소 안에서 끝나 위 쓰기 순서 규칙이 필요 없어진다 (7장)
-- Spark 앱별 자원(`spark.executor.memory`, `spark.cores.max`): 지금은 지정하지 않아 기본값으로 돈다(executor 1g, worker의 코어 전부). 차원 적재(52만 행)는 이대로 충분했다. 8.2의 3g 요청은 4단계 변환에서 측정하고 정한다
+- Spark 앱별 자원(`spark.executor.memory`, `spark.cores.max`): 지금은 지정하지 않아 기본값으로 돈다(executor 1g, worker의 코어 전부). 차원 적재(52만 행)는 이대로 충분했다. 관측 적재도 하루치 묶음(원본 203만 행)까지 힙 1g로 돌았다 (로컬 측정, 7장). 8.2의 3g 요청은 전이·세션 변환에서 측정하고 정한다
 - 대화형 SQL 조회 엔진(Trino·ClickHouse)을 B에 붙일지
 - Iceberg 시간 여행 보존 기간 (`expire_snapshots` 기준)
 

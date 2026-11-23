@@ -79,7 +79,6 @@ def create_table_sql(table: IcebergTable) -> str:
 
 
 def missing_columns(table: IcebergTable, existing: Iterable[str]) -> tuple[Column, ...]:
-
     have = set(existing)
     missing = tuple(c for c in table.columns if c.name not in have)
     required = [c.name for c in missing if not c.nullable]
@@ -96,7 +95,6 @@ def add_columns_sql(table: IcebergTable, columns: Iterable[Column]) -> str:
 
 
 def ensure_tables(spark: SparkSession, tables: Iterable[IcebergTable]) -> EnsureResult:
-
     created: list[str] = []
     altered: dict[str, tuple[str, ...]] = {}
     unchanged: list[str] = []
@@ -193,4 +191,23 @@ DIM_DATE = IcebergTable(
     ),
 )
 
-TABLES: tuple[IcebergTable, ...] = (DIM_STATION, DIM_CHARGER, DIM_DATE)
+OBS_STATUS = IcebergTable(
+    namespace="stg",
+    name="obs_status",
+    columns=(
+        Column("stat_id", "STRING", nullable=False),
+        Column("charger_id", "STRING", nullable=False),
+        Column("run_key", "STRING", nullable=False, comment="이 관측이 나온 원본 run"),
+        Column("observed_at", "TIMESTAMP", nullable=False, comment="run의 collected_at"),
+        Column("observed_date", "DATE", nullable=False, comment="observed_at의 KST 날짜"),
+        Column("source", "STRING", nullable=False, comment="delta | full"),
+        Column("status_code", "STRING", comment="API stat 값 그대로. 빈 값은 NULL"),
+        Column("stat_upd_dt", "TIMESTAMP", comment="statUpdDt: 상태 갱신 일시"),
+        Column("last_ts", "TIMESTAMP", comment="lastTsdt: 마지막 충전 시작 일시"),
+        Column("last_te", "TIMESTAMP", comment="lastTedt: 마지막 충전 종료 일시"),
+        Column("now_ts", "TIMESTAMP", comment="nowTsdt: 충전 중이면 그 시작 일시"),
+    ),
+    partitioned_by=("observed_date",),
+)
+
+TABLES: tuple[IcebergTable, ...] = (DIM_STATION, DIM_CHARGER, DIM_DATE, OBS_STATUS)

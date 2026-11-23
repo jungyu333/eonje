@@ -100,15 +100,16 @@ make up
 make dags-check   # DAG import 오류 확인. "No data found"면 정상
 make dags-verify  # CI와 같은 DAG 무결성 검사 (Airflow 이미지만 있으면 됨, make up 불필요)
 make spark-check  # Spark 경로 확인: executor 계산 + Iceberg 카탈로그. "catalog ok"면 정상
-make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번째부터는 "unchanged=3"
+make ensure-iceberg-tables  # Iceberg 테이블 생성·컬럼 추가. 두 번째부터는 "unchanged=4"
 make load-dims    # 마스터 full run을 차원 테이블에 반영. 반영하면 "applied run ...", 잘린 run뿐이면 건너뛰고 종료 코드 99
 make load-dim-date  # 공휴일을 받아 날짜 차원을 맞춘다. 처음엔 "dim_date updated", 다시 돌리면 "dim_date unchanged"
+make dedupe-load-obs  # 원본 run을 관측(stg.obs_status)으로 적재. 날짜 묶음마다 "loaded ...", 다시 돌리면 그 줄이 없다
 ```
 
 - UI: http://127.0.0.1:8080, `admin` / `AIRFLOW_ADMIN_PASSWORD`
 - Spark master UI: http://127.0.0.1:8090 (Workers 1, Cores 2, Memory 4.0 GiB면 정상)
 - 수집 DAG(`ev_status_10min`, `ev_master_daily`)는 **멈춘 상태(paused)로 등록**되고, 개발 PC에서는 켜지 않는다. 켜면 10분마다·매일 KST 03:11에 수집한다
-- 운영에서 새 DAG도 멈춘 상태로 등록되므로, 첫 배포 후 Airflow UI에서 한 번 켠다 (`ev_master_daily`는 이번에 추가)
+- 운영에서 새 DAG도 멈춘 상태로 등록되므로, 첫 배포 후 Airflow UI에서 한 번 켠다 (가장 최근에 추가한 것은 `ev_transform_10min`)
 - 한 번 실행해 보려면 `airflow dags test`를 쓴다. 스케줄러를 거치지 않고 그 자리에서 끝까지 돌려서, DAG가 멈춰 있어도 된다
 
   ```bash
@@ -148,7 +149,8 @@ main에 머지되면 CI가 이미지를 GHCR에 푸시하고 eonje-a에 배포�
 
 운영 노드(eonje-a)에서 상태 변경분(10분)과 마스터(1일 1회)를 수집하고, 마스터를 Iceberg 차원 테이블
 (`core.dim_station`·`core.dim_charger`)에 SCD2로 적재한다. 날짜 차원(`core.dim_date`)은 공휴일과 함께
-매일 맞춘다. 다음은 관측 → 전이 → 세션 변환이다
+매일 맞춘다. 수집한 상태는 10분마다 관측 테이블(`stg.obs_status`)로 적재한다.
+다음은 전이 → 세션 변환이다
 ([설계 §11](docs/design.md#11-구현-순서-우선순위)).
 
 ## 데이터 출처

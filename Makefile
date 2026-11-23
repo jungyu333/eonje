@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check test-spark load-dims load-dim-date
+.PHONY: help install hooks lint format typecheck test check build run ensure-iceberg-tables test-pdb test-debug up down psql migrate migration test-db migration-check buckets migrate-image airflow-recreate dags-check dag-test dag-pause dags-verify spark-check test-spark load-dims load-dim-date dedupe-load-obs
 
 TAG ?= dev
 COMPOSE := docker compose -f infra/compose.node-a.yaml --env-file .env
@@ -112,3 +112,6 @@ test-spark:      ## Spark 테스트 (make build 먼저). 예: make test-spark AR
 		--entrypoint sh eonje-spark:$(TAG) -c \
 		'[ -d /opt/pytest/pytest ] || uv pip install -q --python /app/.venv/bin/python --target /opt/pytest "pytest>=8"; \
 		 PYTHONPATH=/opt/pytest python -m pytest -p no:cacheprovider -m spark tests/spark $(ARGS)'
+
+dedupe-load-obs: ## 원본 run을 관측(stg.obs_status)으로 적재 (make build, make ensure-iceberg-tables 후)
+	$(COMPOSE) run --rm -T dedupe-load-obs < /dev/null
