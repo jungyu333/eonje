@@ -13,8 +13,9 @@ IMAGE = f"{IMAGE_REPO}-collector:{IMAGE_TAG}"
 SPARK_IMAGE = f"{IMAGE_REPO}-spark:{IMAGE_TAG}"
 NETWORK = os.environ.get("EONJE_TASK_NETWORK", "eonje_default")
 
-# 전국 마스터 약 53페이지 × 페이지당 약 8초 ≈ 7분. 재시도 여유를 두고 20분
-TIMEOUT_MIN = 20
+# 전국 마스터 약 53페이지 × 페이지당 약 8초 ≈ 7분. 재시도 여유를 두고 20분.
+# 변환 잡이 같은 값으로 마스터 run의 완료가 확정되는 시간을 계산한다
+TIMEOUT_MIN = int(os.environ.get("EONJE_MASTER_TIMEOUT_MIN", "20"))
 
 LOAD_TIMEOUT_MIN = 15
 # 날짜 차원은 API 호출 몇 번과 천 행 안팎의 쓰기라 1분 안쪽이다
